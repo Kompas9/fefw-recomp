@@ -202,7 +202,6 @@ struct XciSelection {
     image: String,
     update: Option<String>,
     keys: String,
-    tool: String,
 }
 
 #[tauri::command]
@@ -210,15 +209,11 @@ async fn pick_xci(app: AppHandle) -> Option<XciSelection> {
     let pick = |title: &str, extensions: &[&str]| app.dialog().file().set_title(title)
         .add_filter(title, extensions).blocking_pick_file().and_then(|p| p.into_path().ok());
     let image = pick("Choose your XCI cartridge dump", &["xci"])?;
-    let tool = pick("Choose hactool (required for XCI import)", &["exe"])?;
     let keys = pick("Choose your own prod.keys", &["keys"])?;
     let update = pick("Optional: choose the matching update NSP (Cancel to skip)", &["nsp"]);
     Some(XciSelection { image: dump::fwd(&image), update: update.map(|p| dump::fwd(&p)),
-        keys: dump::fwd(&keys), tool: dump::fwd(&tool) })
+        keys: dump::fwd(&keys) })
 }
-
-#[derive(Serialize, Clone)]
-struct XciProgress { message: String }
 
 #[tauri::command]
 async fn import_xci(app: AppHandle, state: State<'_, Arc<setup::Shared>>, selection: XciSelection) -> Result<String, String> {
@@ -231,14 +226,15 @@ async fn import_xci(app: AppHandle, state: State<'_, Arc<setup::Shared>>, select
     let builds = builds_of(&repo);
     let parent = if package_tools().is_some() { game_dir_of(&cfg, &repo).join("xci_dump") }
         else { repo.join("game").join("xci_dump") };
-    let inputs = xci::Inputs { image: selection.image.into(), update: selection.update.map(PathBuf::from),
-        keys: selection.keys.into(), tool: selection.tool.into() };
+    let inputs = xci::Inputs { image: selection.image.into(), update: selection.update.map(PathBuf::from), keys: selection.keys.into() };
+    let helper = if let Some(tools) = package_tools() { tools.join("xci").join("fefw-archive.exe") }
+        else { repo.join("tools").join("xci").join("bin").join("fefw-archive.exe") };
     let shared = state.inner().clone();
     shared.cancel.store(false, Ordering::SeqCst);
     let out = tauri::async_runtime::spawn_blocking(move || {
         let _guard = guard;
-        let out = xci::extract(&inputs, &parent, &builds, &mut |message| {
-            let _ = app.emit("xci-progress", XciProgress { message: message.into() });
+        let out = xci::extract(&helper, &inputs, &parent, &builds, &mut |progress| {
+            let _ = app.emit("xci-progress", progress);
         }, &|| shared.cancel.load(Ordering::SeqCst), &shared.pid)?;
         let report = dump::scan(&dump::fwd(&out), &builds);
         if report.chosen.is_none() {

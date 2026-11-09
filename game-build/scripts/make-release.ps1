@@ -15,6 +15,7 @@ param(
     [string]$Out = "",
     [string]$RtDir = "",
     [string]$Launcher = "",
+    [string]$ArchiveToolsDir = "",
     [string]$ZigVersion = "0.17.0",
     [string]$ZigSha256 = "b5663f69581dcf391293fbf16c06cb80d81d806545ce618b4d0bab7f0eb8c428",
     [string]$PythonVersion = "3.13.17",
@@ -82,12 +83,17 @@ if ($buildLauncher) {
     } finally { Pop-Location; Remove-Item Env:RUSTFLAGS }
 }
 Need $Launcher 'fefw-launcher.exe'
+if (-not $ArchiveToolsDir) { $ArchiveToolsDir = Join-Path $root 'tools\xci\bin' }
+Need (Join-Path $ArchiveToolsDir 'fefw-archive.exe') 'bundled archive helper (see tools/xci/README.md)'
+Need (Join-Path $ArchiveToolsDir 'corresponding-source.zip') 'archive helper corresponding source'
+Need (Join-Path $ArchiveToolsDir 'licenses') 'archive helper licences'
 
 # --- built from this checkout
 Put (Join-Path $RtDir 'fefw_rt.dll') 'fefw_rt.dll'
 Put (Join-Path $RtDir 'fonts\DejaVuSans.ttf') 'fonts\DejaVuSans.ttf'
 Get-ChildItem $RtDir -Filter 'astcdec-*-shared.dll' -ErrorAction SilentlyContinue | ForEach-Object { Put $_.FullName $_.Name }
 Put $Launcher 'fefw-launcher.exe'
+Mirror $ArchiveToolsDir 'tools\xci'
 Put (Join-Path $RtDir 'fefw_rt.lib') 'tools\build\sdk\fefw_rt.lib'
 foreach ($f in 'fefw_rt_api.h', 'fefw_stub.cpp') { Put "$root\game-build\fefw\src\$f" "tools\build\sdk\$f" }
 foreach ($f in 'fefw.rc', 'fefw.manifest', 'fefw.ico') { Put "$root\game-build\fefw\res\$f" "tools\build\sdk\$f" }

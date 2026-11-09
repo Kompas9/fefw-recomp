@@ -29,7 +29,7 @@ software and draws with Vulkan. It is not an emulator.
   - a folder with `exefs\` and `romfs\`
   - a dump folder with `base\` and `updates\<version>\`
   - a [`.nup`](https://github.com/a55uka/nup) package
-  - an uncompressed `.xci`, imported with your own keys and a separately installed compatible hactool (see below)
+  - an uncompressed `.xci`, imported with the bundled Lichii archive reader and your own keys (see below)
 
 ## Getting started
 
@@ -43,29 +43,27 @@ Your saves are in the `save\` folder next to the launcher.
 
 ### Optional XCI import
 
-On Setup, press **.xci**, then select your cartridge dump, a separately installed
-[hactool](https://github.com/SciresM/hactool) executable and your own `prod.keys`.
-The final picker accepts a matching update **NSP**; Cancel skips that optional file.
+On Setup, press **.xci**, select your cartridge dump and your own `prod.keys`.
+The last picker accepts a matching update **NSP**; Cancel skips that optional file.
 An XCI without the supported executable needs the supported update supplied separately.
-The selected extractor must support the archive's encryption and filesystem format;
-older hactool builds may not support Switch 2 content. Rights-managed update NCAs also
-need your own title keys available in hactool's usual `~/.switch/title.keys` location.
-No extractor or keys are downloaded or bundled.
+The bundled Lichii archive reader handles extraction automatically; no emulator or
+separately installed extractor is required. Keys are never downloaded or bundled.
+For rights-managed content, tickets in the NSP are read; an optional `title.keys`
+next to the selected `prod.keys` is also used.
 
-The importer extracts the secure partition, selects Fire Emblem Program archives and
-checks the executable build ID against the same supported-build list as folder/NUP setup.
-For patch updates it passes the base NCA to hactool, producing the full merged RomFS.
+The importer checks the executable against the same supported-build list as
+folder/NUP setup and produces the full merged RomFS for patch updates.
 After validation, press **Use these game files**, then **Set up** as usual.
 
-Imports are kept in a new `xci_dump/import-...` folder under the game folder (or
-`game/xci_dump` in a source checkout). Allow space for the encrypted archive contents
-**and** the extracted game during import. Temporary encrypted copies are removed on success;
-Cancel or an extraction failure removes only that attempt's scratch folder.
-Existing imports, the selected dump and source archives are not overwritten.
-Helper output is not shown or saved because hactool may print key material.
+Each import creates a new `xci_dump/import-...` folder under the game folder
+(or `game/xci_dump` in a checkout). Allow space for the full decrypted dump.
+The source archives and existing imports are not overwritten. Cancellation/failure
+cleans only the current attempt. Keys and ticket-derived keys stay in memory;
+no key files are copied into the extracted dump.
 
-This imports the game and its supported update only; DLC, compressed XCZ/NSZ and
-split cartridge images are not imported. Use the existing folder/NUP flow for those dumps.
+DLC, compressed XCZ/NSZ and split XCI are not imported by this action; the existing
+folder/NUP flow remains available. For source/release builders, see
+[tools/xci/README.md](tools/xci/README.md) for the helper build and corresponding source.
 
 ### Settings
 
@@ -167,6 +165,10 @@ game files or anything made from them.
 See [docs/BUILDING.md](docs/BUILDING.md). Contributions are welcome.
 
 ## Credits
+
+XCI import uses the archive readers from [Lichii](https://github.com/zortos293/Lichii)
+(GPL-3.0-or-later, incorporating Eden/yuzu code). The bundled helper includes its
+corresponding source, build recipe and third-party notices in `tools/xci`.
 
 This project stands on the work of others. Thank you.
 

@@ -131,9 +131,9 @@ export async function render(el, ctx) {
             </div>
             ${importBusy ? `<p class="dim" id="nup-msg">${esc(nupMsg(importProgress))}</p><progress max="100" ${importProgress?.total ? `value="${nupPct(importProgress)}"` : ''}></progress><button class="btn" id="cancel-import">Cancel import</button>` : ''}
             <p class="faint">Or pick a <code>.nup</code> package (the NUP format of github.com/a55uka/nup): it is unpacked once into a <code>nup_dump</code> folder and used from there, so it needs the free space of the whole game.</p>
-            <p class="faint">XCI import needs your own <code>prod.keys</code> and a separately installed hactool that supports the archive. You may also select an update NSP. It creates a decrypted copy and needs space for the archive contents plus the full extracted game. No keys or extractor are downloaded.</p>
+            <p class="faint">XCI import uses the bundled Lichii archive reader and your own <code>prod.keys</code>. You may also select a matching update NSP. It writes a decrypted dump and needs free space for the full extracted game. No emulator or separate extractor is needed.</p>
             <p class="faint">Either the folder holding <code>exefs/</code> and <code>romfs/</code> of the supported update, or a dump root with <code>base/</code> and <code>updates/&lt;version&gt;/</code>. The ExeFS needs main, sdk, subsdk0, subsdk1, subsdk2 and rtld. DLC you dumped goes in <code>dlc/&lt;title id&gt;/romfs</code> of the same folder (a <code>.nup</code> with add-ons is unpacked that way).</p>
-            ${status.package ? '<p class="faint">Folder/NUP setup is self-contained. Optional XCI import requires hactool and your own keys.</p>' : ''}
+            ${status.package ? '<p class="faint">All extraction and build tools are included. XCI import additionally needs your own keys.</p>' : ''}
           </div>
         </div>
 
