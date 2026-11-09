@@ -10,6 +10,7 @@ mod play;
 mod settings;
 mod setup;
 mod update;
+mod xci;
 
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -183,6 +184,71 @@ async fn pick_nup(app: AppHandle, start: Option<String>) -> Option<String> {
     dlg.blocking_pick_file().and_then(|p| p.into_path().ok()).map(|p| dump::fwd(&p))
 }
 
+// Serialize imports with setup startup: neither may change inputs beneath the other.
+static IMPORT_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+struct ImportGuard;
+impl ImportGuard {
+    fn acquire() -> Result<Self, String> {
+        IMPORT_BUSY.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .map(|_| Self).map_err(|_| "A game import is already running.".into())
+    }
+}
+impl Drop for ImportGuard {
+    fn drop(&mut self) { IMPORT_BUSY.store(false, Ordering::SeqCst); }
+}
+
+#[derive(Serialize, Deserialize)]
+struct XciSelection {
+    image: String,
+    update: Option<String>,
+    keys: String,
+    tool: String,
+}
+
+#[tauri::command]
+async fn pick_xci(app: AppHandle) -> Option<XciSelection> {
+    let pick = |title: &str, extensions: &[&str]| app.dialog().file().set_title(title)
+        .add_filter(title, extensions).blocking_pick_file().and_then(|p| p.into_path().ok());
+    let image = pick("Choose your XCI cartridge dump", &["xci"])?;
+    let tool = pick("Choose hactool (required for XCI import)", &["exe"])?;
+    let keys = pick("Choose your own prod.keys", &["keys"])?;
+    let update = pick("Optional: choose the matching update NSP (Cancel to skip)", &["nsp"]);
+    Some(XciSelection { image: dump::fwd(&image), update: update.map(|p| dump::fwd(&p)),
+        keys: dump::fwd(&keys), tool: dump::fwd(&tool) })
+}
+
+#[derive(Serialize, Clone)]
+struct XciProgress { message: String }
+
+#[tauri::command]
+async fn import_xci(app: AppHandle, state: State<'_, Arc<setup::Shared>>, selection: XciSelection) -> Result<String, String> {
+    let guard = ImportGuard::acquire()?;
+    if state.progress.lock().unwrap().state == "running" {
+        return Err("Setup is running. Pause it first.".into());
+    }
+    let cfg = load_config(&app);
+    let repo = need_repo(&cfg)?;
+    let builds = builds_of(&repo);
+    let parent = if package_tools().is_some() { game_dir_of(&cfg, &repo).join("xci_dump") }
+        else { repo.join("game").join("xci_dump") };
+    let inputs = xci::Inputs { image: selection.image.into(), update: selection.update.map(PathBuf::from),
+        keys: selection.keys.into(), tool: selection.tool.into() };
+    let shared = state.inner().clone();
+    shared.cancel.store(false, Ordering::SeqCst);
+    let out = tauri::async_runtime::spawn_blocking(move || {
+        let _guard = guard;
+        let out = xci::extract(&inputs, &parent, &builds, &mut |message| {
+            let _ = app.emit("xci-progress", XciProgress { message: message.into() });
+        }, &|| shared.cancel.load(Ordering::SeqCst), &shared.pid)?;
+        let report = dump::scan(&dump::fwd(&out), &builds);
+        if report.chosen.is_none() {
+            return Err(format!("The extracted dump did not pass validation: {}", report.errors.join(" ")));
+        }
+        Ok(dump::fwd(&out))
+    }).await.map_err(|e| e.to_string())?;
+    out
+}
+
 #[derive(Serialize, Clone)]
 struct NupProgress {
     done: u64,
@@ -194,6 +260,7 @@ struct NupProgress {
 /// folder) and returns that folder. Emits "nup-progress". A finished unpack of the same package is reused.
 #[tauri::command]
 async fn import_nup(app: AppHandle, state: State<'_, Arc<setup::Shared>>, path: String) -> Result<String, String> {
+    let guard = ImportGuard::acquire()?;
     if state.progress.lock().unwrap().state == "running" {
         return Err("Setup is running. Pause it first.".into());
     }
@@ -201,8 +268,11 @@ async fn import_nup(app: AppHandle, state: State<'_, Arc<setup::Shared>>, path: 
     let repo = need_repo(&cfg)?;
     let out = if package_tools().is_some() { game_dir_of(&cfg, &repo).join("nup_dump") } else { repo.join("game").join("nup_dump") };
     let src = PathBuf::from(path.trim());
+    let shared = state.inner().clone();
+    shared.cancel.store(false, Ordering::SeqCst);
     let emitter = app.clone();
     let res = tauri::async_runtime::spawn_blocking(move || {
+        let _guard = guard;
         let mut last = 0u64;
         nup::extract(
             &src,
@@ -213,7 +283,7 @@ async fn import_nup(app: AppHandle, state: State<'_, Arc<setup::Shared>>, path: 
                     let _ = emitter.emit("nup-progress", NupProgress { done, total, file: file.to_string() });
                 }
             },
-            &|| false,
+            &|| shared.cancel.load(Ordering::SeqCst),
         )
     })
     .await
@@ -284,6 +354,7 @@ fn setup_status(app: AppHandle, state: State<Arc<setup::Shared>>) -> SetupStatus
 
 #[tauri::command]
 fn start_setup(app: AppHandle, state: State<Arc<setup::Shared>>) -> Result<(), String> {
+    let _guard = ImportGuard::acquire()?;
     let cfg = load_config(&app);
     let p = paths(&cfg)?;
     {
@@ -476,6 +547,8 @@ fn main() {
             get_overview,
             pick_folder,
             pick_nup,
+            pick_xci,
+            import_xci,
             import_nup,
             validate_dump,
             save_dump,
@@ -498,4 +571,16 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running the launcher");
+}
+
+#[cfg(test)]
+mod import_tests {
+    use super::*;
+    #[test]
+    fn imports_and_setup_startup_are_mutually_exclusive_and_release_on_error() {
+        let guard = ImportGuard::acquire().unwrap();
+        assert!(ImportGuard::acquire().is_err());
+        drop(guard);
+        let _next = ImportGuard::acquire().unwrap();
+    }
 }

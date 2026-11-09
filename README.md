@@ -25,20 +25,47 @@ software and draws with Vulkan. It is not an emulator.
 - Windows 10 or 11, 64-bit
 - A GPU with Vulkan 1.3 and an up-to-date driver
 - 16 GB of RAM and about 30 GB of free disk space
-- Your own decrypted dump of the game at update **131072**, in one of these forms:
+- Your own dump of the game at update **131072**, in one of these forms:
   - a folder with `exefs\` and `romfs\`
   - a dump folder with `base\` and `updates\<version>\`
   - a [`.nup`](https://github.com/a55uka/nup) package
+  - an uncompressed `.xci`, imported with your own keys and a separately installed compatible hactool (see below)
 
 ## Getting started
 
 1. Download `fefw-recomp-<version>-win64.zip` from the [Releases](../../releases) page and extract it to its own folder.
 2. Run `fefw-launcher.exe`.
-3. On **Setup**, choose your dump folder (or **.nup** file) and press **Set up**. The launcher checks your files, builds the game on
+3. On **Setup**, choose your dump folder, **.nup** file, or use **.xci** to import a cartridge dump and press **Set up**. The launcher checks your files, builds the game on
    your PC and prepares the shaders. The first setup takes a while; you can **Pause** it and continue later.
 4. Press **Play**.
 
 Your saves are in the `save\` folder next to the launcher.
+
+### Optional XCI import
+
+On Setup, press **.xci**, then select your cartridge dump, a separately installed
+[hactool](https://github.com/SciresM/hactool) executable and your own `prod.keys`.
+The final picker accepts a matching update **NSP**; Cancel skips that optional file.
+An XCI without the supported executable needs the supported update supplied separately.
+The selected extractor must support the archive's encryption and filesystem format;
+older hactool builds may not support Switch 2 content. Rights-managed update NCAs also
+need your own title keys available in hactool's usual `~/.switch/title.keys` location.
+No extractor or keys are downloaded or bundled.
+
+The importer extracts the secure partition, selects Fire Emblem Program archives and
+checks the executable build ID against the same supported-build list as folder/NUP setup.
+For patch updates it passes the base NCA to hactool, producing the full merged RomFS.
+After validation, press **Use these game files**, then **Set up** as usual.
+
+Imports are kept in a new `xci_dump/import-...` folder under the game folder (or
+`game/xci_dump` in a source checkout). Allow space for the encrypted archive contents
+**and** the extracted game during import. Temporary encrypted copies are removed on success;
+Cancel or an extraction failure removes only that attempt's scratch folder.
+Existing imports, the selected dump and source archives are not overwritten.
+Helper output is not shown or saved because hactool may print key material.
+
+This imports the game and its supported update only; DLC, compressed XCZ/NSZ and
+split cartridge images are not imported. Use the existing folder/NUP flow for those dumps.
 
 ### Settings
 

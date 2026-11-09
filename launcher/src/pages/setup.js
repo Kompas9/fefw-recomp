@@ -4,8 +4,9 @@ import { api, esc, icon, refreshIcons, toast, errText } from '../util.js';
 // one listener for the session; the page being shown sets the handler
 let nupHandler = null;
 listen('nup-progress', (ev) => nupHandler && nupHandler(ev.payload));
+listen('xci-progress', (ev) => nupHandler && nupHandler(ev.payload));
 const nupPct = (p) => (p && p.total ? Math.min(100, Math.floor((100 * p.done) / p.total)) : 0);
-const nupMsg = (p) => (p && p.total ? `Unpacking the .nup: ${nupPct(p)}%${p.file ? ` (${p.file})` : ''}` : 'Reading the .nup...');
+const nupMsg = (p) => p?.message || (p && p.total ? `Unpacking the .nup: ${nupPct(p)}%${p.file ? ` (${p.file})` : ''}` : 'Reading the .nup...');
 
 const MAX_LOG = 600;
 
@@ -72,8 +73,8 @@ export async function render(el, ctx) {
   let report = null;
   let status = null;
   let log = [];
-  let nupBusy = false;
-  let nupProgress = null;
+  let importBusy = false;
+  let importProgress = null;
   const refresh = async () => {
     report = path && ov.repo_ok ? await api('validate_dump', { path }) : null;
     status = ov.repo_ok ? await api('setup_status') : null;
@@ -124,13 +125,15 @@ export async function render(el, ctx) {
           <div class="stack">
             <div class="row">
               <input type="text" id="path" spellcheck="false" placeholder="folder with exefs/ and romfs/" value="${esc(path)}" />
-              <button class="btn" id="browse" ${nupBusy ? 'disabled' : ''}>${icon('folder-open')}Browse</button>
-              <button class="btn" id="browse-nup" ${nupBusy ? 'disabled' : ''}>${icon('file-archive')}.nup</button>
+              <button class="btn" id="browse" ${importBusy || status.progress.state === 'running' ? 'disabled' : ''}>${icon('folder-open')}Browse</button>
+              <button class="btn" id="browse-nup" ${importBusy || status.progress.state === 'running' ? 'disabled' : ''}>${icon('file-archive')}.nup</button>
+              <button class="btn" id="browse-xci" ${importBusy || status.progress.state === 'running' ? 'disabled' : ''}>${icon('file-archive')}.xci</button>
             </div>
-            ${nupBusy ? `<p class="dim" id="nup-msg">${nupMsg(nupProgress)}</p><progress max="100" value="${nupPct(nupProgress)}"></progress>` : ''}
+            ${importBusy ? `<p class="dim" id="nup-msg">${esc(nupMsg(importProgress))}</p><progress max="100" ${importProgress?.total ? `value="${nupPct(importProgress)}"` : ''}></progress><button class="btn" id="cancel-import">Cancel import</button>` : ''}
             <p class="faint">Or pick a <code>.nup</code> package (the NUP format of github.com/a55uka/nup): it is unpacked once into a <code>nup_dump</code> folder and used from there, so it needs the free space of the whole game.</p>
+            <p class="faint">XCI import needs your own <code>prod.keys</code> and a separately installed hactool that supports the archive. You may also select an update NSP. It creates a decrypted copy and needs space for the archive contents plus the full extracted game. No keys or extractor are downloaded.</p>
             <p class="faint">Either the folder holding <code>exefs/</code> and <code>romfs/</code> of the supported update, or a dump root with <code>base/</code> and <code>updates/&lt;version&gt;/</code>. The ExeFS needs main, sdk, subsdk0, subsdk1, subsdk2 and rtld. DLC you dumped goes in <code>dlc/&lt;title id&gt;/romfs</code> of the same folder (a <code>.nup</code> with add-ons is unpacked that way).</p>
-            ${status.package ? '<p class="faint">Everything the setup needs is in this package: nothing else to install.</p>' : ''}
+            ${status.package ? '<p class="faint">Folder/NUP setup is self-contained. Optional XCI import requires hactool and your own keys.</p>' : ''}
           </div>
         </div>
 
@@ -139,11 +142,11 @@ export async function render(el, ctx) {
         ${report && report.dlc && report.dlc.length ? `<div class="banner info">${icon('package')}<div>DLC from your dump: ${report.dlc.map(esc).join(', ')}</div></div>` : ''}
 
         <div class="row">
-          <button class="btn ${ok && saved !== path ? 'primary' : ''}" id="use" ${ok && status.progress.state !== 'running' ? '' : 'disabled'}>${icon('circle-check')}Use these game files</button>
+          <button class="btn ${ok && saved !== path ? 'primary' : ''}" id="use" ${ok && !importBusy && status.progress.state !== 'running' ? '' : 'disabled'}>${icon('circle-check')}Use these game files</button>
         </div>
 
         ${status.package ? "" : toolsHtml(status.tools)}
-        ${ok && saved === path ? stepsHtml(status) : ''}
+        ${ok && saved === path && !importBusy ? stepsHtml(status) : ''}
 
         <div class="card">
           <h2>${icon('terminal')}Log</h2>
@@ -152,6 +155,7 @@ export async function render(el, ctx) {
       </div>`;
     refreshIcons();
     drawLog();
+    el.querySelector('#cancel-import')?.addEventListener('click', () => api('cancel_setup'));
     const input = el.querySelector('#path');
     const check = async () => {
       path = input.value.trim();
@@ -170,8 +174,8 @@ export async function render(el, ctx) {
     el.querySelector('#browse-nup').addEventListener('click', async () => {
       const picked = await api('pick_nup', { start: null });
       if (!picked) return;
-      nupBusy = true;
-      nupProgress = null;
+      importBusy = true;
+      importProgress = null;
       draw();
       try {
         path = await api('import_nup', { path: picked });
@@ -179,8 +183,26 @@ export async function render(el, ctx) {
       } catch (e) {
         toast(errText(e), 'error');
       }
-      nupBusy = false;
+      importBusy = false;
       draw();
+    });
+    el.querySelector('#browse-xci').addEventListener('click', async () => {
+      try {
+        const selection = await api('pick_xci');
+        if (!selection) return;
+        importBusy = true;
+        importProgress = { message: 'Starting XCI import...' };
+        draw();
+        const imported = await api('import_xci', { selection });
+        const checked = await api('validate_dump', { path: imported });
+        path = imported;
+        report = checked;
+      } catch (e) {
+        toast(errText(e), 'error');
+      } finally {
+        importBusy = false;
+        draw();
+      }
     });
     el.querySelector('#use').addEventListener('click', async () => {
       try {
@@ -197,12 +219,12 @@ export async function render(el, ctx) {
   }
 
   nupHandler = (p) => {
-    nupProgress = p;
+    importProgress = p;
     const msg = el.querySelector('#nup-msg');
     if (msg) {
       msg.textContent = nupMsg(p);
       const bar = msg.nextElementSibling;
-      if (bar) bar.value = nupPct(p);
+      if (bar && p?.total) bar.value = nupPct(p);
     }
   };
   ctx.onLog((lines) => {
