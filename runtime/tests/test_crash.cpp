@@ -8,6 +8,8 @@
 #include "nxrt/diag.h"
 #include "nxrt/dispatch.h"
 #include "nxrt/symbols.h"
+#include "nxrt/memory.h"
+#include "nxrt/write_watch.h"
 
 #include <windows.h>
 
@@ -122,6 +124,9 @@ NXTEST(write_fault_report_fields) {
     const std::string rep = run_guest_fault(0);
     CHECK_MSG(has(rep, "HOST EXCEPTION 0xC0000005"), "access violation header missing");
     CHECK_MSG(has(rep, "writing address 0x0"), "writing address line missing");
+    CHECK(has(rep, "host page:"));
+    CHECK(has(rep, "write-watch owner=none"));
+    CHECK(has(rep, "guest VM:"));
     CHECK_MSG(has(rep, "last guest function entered: f_7100001000"), "guest function not resolved");
     CHECK_MSG(has(rep, "x0 "), "x0 register line missing");
     CHECK_MSG(has(rep, "0001111122223333"), "x0 value missing");
@@ -357,4 +362,27 @@ NXTEST(child_stack_overflow_terminates_with_report) {
     CHECK_MSG(has(text, "host call stack"), "host call stack missing");
     remove_temp(report);
     remove_temp(log);
+}
+
+NXTEST(guest_heap_fault_reports_protection_and_owner) {
+    namespace mem = nxrt::mem;
+    mem::shutdown();
+    REQUIRE(mem::init() && mem::heap_create(64ull << 20) && mem::heap_commit(0, mem::kPage));
+    auto* r = mem::ww::region_create(mem::kHeapBase, mem::kPage, "test compute");
+    REQUIRE(r != nullptr);
+    REQUIRE(mem::ww::arm(r, 0, 1) && mem::ww::guard(r, 0, 1));
+    EXCEPTION_RECORD rec{};
+    rec.ExceptionCode = EXCEPTION_ACCESS_VIOLATION;
+    rec.NumberParameters = 2;
+    rec.ExceptionInformation[0] = 1;
+    rec.ExceptionInformation[1] = mem::kHeapBase;
+    CONTEXT context{};
+    EXCEPTION_POINTERS ep{&rec, &context};
+    const auto rep = nxrt::crash_build_report(&ep);
+    CHECK(has(rep, "protect=0x1")); // PAGE_NOACCESS
+    CHECK(has(rep, "committed=1 class=3")); // guest RW, host guard
+    CHECK(has(rep, "owner=test compute"));
+    CHECK(has(rep, "prot=1 valid=1 guard=1"));
+    mem::ww::region_destroy(r);
+    mem::shutdown();
 }

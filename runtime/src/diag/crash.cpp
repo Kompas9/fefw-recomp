@@ -19,6 +19,8 @@
 #include "nxrt/dispatch.h"
 #include "nxrt/gauge.h"
 #include "nxrt/log.h"
+#include "nxrt/write_watch.h"
+#include "nxrt/memory.h"
 #include "nxrt/symbols.h"
 #include "stackwalk.h"
 
@@ -159,6 +161,15 @@ std::string build_report(const EXCEPTION_RECORD* rec, const CONTEXT* cx, DWORD t
         const ULONG_PTR kind = rec->ExceptionInformation[0];
         const char* what = kind == 0 ? "reading" : kind == 1 ? "writing" : kind == 8 ? "executing" : "accessing";
         appendf(out, "  %s address 0x%llx\n", what, static_cast<unsigned long long>(rec->ExceptionInformation[1]));
+        const uint64_t addr = rec->ExceptionInformation[1];
+        MEMORY_BASIC_INFORMATION mbi{};
+        if (VirtualQuery(reinterpret_cast<void*>(addr), &mbi, sizeof mbi)) {
+            appendf(out, "  host page: base=0x%llx size=0x%llx allocation=0x%llx state=0x%lx protect=0x%lx allocation_protect=0x%lx type=0x%lx\n",
+                (unsigned long long)mbi.BaseAddress, (unsigned long long)mbi.RegionSize, (unsigned long long)mbi.AllocationBase,
+                mbi.State, mbi.Protect, mbi.AllocationProtect, mbi.Type);
+        } else appendf(out, "  host page: VirtualQuery failed error=%lu\n", GetLastError());
+        out += mem::describe_page(addr);
+        out += mem::ww::describe_page(addr);
     }
 
     // Last guest function: the lifted function whose host code contains the faulting instruction.

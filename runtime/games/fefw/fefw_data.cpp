@@ -31,7 +31,7 @@ const game::Info& data_info() {
         g.game_ini = "fefw.ini";
         g.shader_pack = "shader_cache.fefwshc";
         g.save_folder = "FortunesWeaveRecompPC";
-        g.jc2_mouse_default = "off";   // the PC mouse in the game's menus lands off the buttons (pointer mapping); [input] jc2_mouse turns it on
+        g.jc2_mouse_default = "auto";  // the PC mouse is the game's Joy-Con 2 mouse, the last device used wins (hid.cpp, fefw_mouse.cpp)
         return g;
     }();
     return info;

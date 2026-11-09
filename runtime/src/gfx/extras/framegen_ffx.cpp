@@ -7,11 +7,14 @@
 #include <algorithm>
 #include <cstring>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <mutex>
 #include <vector>
 #include <string>
 
+#include "extras/ffx_files.h"
 #include "extras/framegen.h"
 #include "nxrt/config.h"
 #include "nxrt/gfx.h"
@@ -26,28 +29,6 @@ namespace nxrt::extras {
 namespace {
 
 constexpr const char* kTag = "framegen";
-
-std::wstring widen(const std::string& s) {
-    if (s.empty()) return {};
-    const int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
-    std::wstring w(static_cast<size_t>(n), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), w.data(), n);
-    return w;
-}
-bool exists(const std::wstring& p) { return GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES; }
-
-// [dlss] frame_gen_dll, else upscalers\fsr3\amd_fidelityfx_vk.dll next to the executable, else the executable's folder
-std::wstring find_dll() {
-    const std::string cfg = config_get_str("dlss", "frame_gen_dll", "");
-    if (!cfg.empty()) return exists(widen(cfg)) ? widen(cfg) : std::wstring();
-    wchar_t buf[MAX_PATH];
-    const DWORD n = GetModuleFileNameW(nullptr, buf, MAX_PATH);
-    std::wstring exe(buf, n);
-    exe = exe.substr(0, exe.find_last_of(L"\\/") + 1);
-    for (const std::wstring& p : {exe + L"upscalers\\fsr3\\amd_fidelityfx_vk.dll", exe + L"amd_fidelityfx_vk.dll"})
-        if (exists(p)) return p;
-    return {};
-}
 
 struct Ffx {
     HMODULE mod = nullptr;
@@ -75,6 +56,7 @@ struct Ffx {
     bool fg_inverted = true;
     uint64_t frame_id = 1;
     bool logged = false;
+    std::atomic<bool> reset_pending{false};   // the frame's inputs had the game's reset (camera cut): the next interpolation resets
     // [dlss] frame_gen_dump_every: a real frame, the generated one after it and the next real one, read back from the present callback
     struct Slot {
         gfx::Buffer buf;
@@ -86,6 +68,7 @@ struct Ffx {
     std::atomic<int> next{-1};          // the slot the present callback fills next (-1: none armed, 3: all filled)
     uint64_t armed_at = 0;
     int dumps = 0;
+    std::chrono::steady_clock::time_point installed = std::chrono::steady_clock::now();
 };
 Ffx& g() {
     static Ffx f;
@@ -104,7 +87,7 @@ void step(const char* what) {
 bool load() {
     Ffx& f = g();
     if (f.mod) return true;
-    const std::wstring path = find_dll();
+    const std::wstring path = ffx_find_framegen().dll;
     if (path.empty()) return false;
     f.mod = LoadLibraryW(path.c_str());
     if (!f.mod) {
@@ -134,6 +117,35 @@ void destroy_contexts() {
     f.fns = {};
 }
 
+// The swapchain's frame pacing ([dlss] frame_gen_pacing). AMD's default paces to the recent average frame time less a 0.1 ms margin and,
+// after a heavy stretch, can stay at the slow target (ffx_api_types.h: "gets stuck at targeting ~33ms"; the game then runs slower with
+// frame generation than without it). `game` (the default) sets AMD's "tuning set B" for that case: 0.01 ms margin, variance factor 0.3.
+// `amd` keeps AMD's defaults. The v1.1.4 Vulkan swapchain takes only these two values (not hybrid spin) and its configure function
+// returns an error code even when it has applied them (its `return FFX_OK` is unreachable), so that code is not an error here.
+void tune_pacing(Ffx& f) {
+    static const std::string mode = config_get_str("dlss", "frame_gen_pacing", "game");
+    if (mode == "amd") return;
+    FfxApiSwapchainFramePacingTuning t = {};
+    t.safetyMarginInMs = 0.01f;
+    t.varianceFactor = 0.3f;
+    t.allowHybridSpin = false;
+    t.hybridSpinTime = 2;
+    t.allowWaitForSingleObjectOnFence = false;
+    ffxConfigureDescFrameGenerationSwapChainKeyValueVK kv = {};
+    kv.header.type = FFX_API_CONFIGURE_DESC_TYPE_FRAMEGENERATIONSWAPCHAIN_KEYVALUE_VK;
+    kv.key = FFX_API_CONFIGURE_FG_SWAPCHAIN_KEY_FRAMEPACINGTUNING;
+    kv.ptr = &t;
+    const ffxReturnCode_t r = f.configure(&f.sc_ctx, &kv.header);
+    static bool told = false;
+    if (!told) {
+        told = true;
+        if (r == FFX_API_RETURN_OK || r == FFX_API_RETURN_ERROR_RUNTIME_ERROR)
+            NXLOG_I(kTag, "FSR 3 frame pacing: margin 0.01 ms, variance factor 0.3 ([dlss] frame_gen_pacing = amd keeps AMD's defaults)");
+        else
+            NXLOG_W(kTag, "FSR 3 frame pacing tuning not taken (%u): AMD's defaults", r);
+    }
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL hook_create(VkDevice d, const VkSwapchainCreateInfoKHR* ci, const VkAllocationCallbacks* a, VkSwapchainKHR* out) {
     Ffx& f = g();
     if (f.failed) return f.orig_create(d, ci, a, out);
@@ -158,6 +170,7 @@ VKAPI_ATTR VkResult VKAPI_CALL hook_create(VkDevice d, const VkSwapchainCreateIn
         f.extent = ci->imageExtent;
         *out = sc;
         NXLOG_I(kTag, "FSR 3 frame generation swapchain remade %ux%u", ci->imageExtent.width, ci->imageExtent.height);
+        tune_pacing(f);
         return VK_SUCCESS;
     }
     ffxCreateContextDescFrameGenerationSwapChainVK desc = {};
@@ -194,6 +207,7 @@ VKAPI_ATTR VkResult VKAPI_CALL hook_create(VkDevice d, const VkSwapchainCreateIn
     f.extent = ci->imageExtent;
     *out = sc;
     NXLOG_I(kTag, "FSR 3 frame generation swapchain %ux%u, format %d", ci->imageExtent.width, ci->imageExtent.height, static_cast<int>(ci->imageFormat));
+    tune_pacing(f);
     return VK_SUCCESS;
 }
 
@@ -270,7 +284,8 @@ void img_barrier(VkCommandBuffer cb, VkImage img, VkImageLayout from, VkImageLay
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
 }
 
-// Only with frame_gen_dump_every: FFX's composition (a copy of the frame into the swapchain image), plus the read-back of armed frames.
+// Only with frame_gen_dump_every / frame_gen_dump_at: the composition of each presented frame (real or generated) into the swapchain image
+// (a copy, with the layout changes for the states FFX reports), plus the read-back of the armed frames.
 ffxReturnCode_t compose(ffxCallbackDescFrameGenerationPresent* d, void*) {
     Ffx& f = g();
     auto cb = static_cast<VkCommandBuffer>(d->commandList);
@@ -308,9 +323,30 @@ int64_t dump_every() {
     return v;
 }
 
+// [dlss] frame_gen_dump_at: seconds after the FFX swapchain was installed, a comma list (a dump at each)
+const std::vector<double>& dump_at() {
+    static const std::vector<double> v = [] {
+        std::vector<double> out;
+        const std::string s = config_get_str("dlss", "frame_gen_dump_at", "");
+        size_t i = 0;
+        while (i < s.size()) {
+            const size_t j = s.find(',', i);
+            const std::string t = s.substr(i, j == std::string::npos ? std::string::npos : j - i);
+            if (!t.empty()) out.push_back(std::atof(t.c_str()));
+            if (j == std::string::npos) break;
+            i = j + 1;
+        }
+        std::sort(out.begin(), out.end());
+        return out;
+    }();
+    return v;
+}
+bool dumping() { return dump_every() > 0 || !dump_at().empty(); }
+
 // Render thread: arm a dump every N frames (4 at most), write the PNGs once the frames are surely done.
 void dump_tick(Ffx& f, VkExtent2D bb, VkFormat fmt) {
-    if (dump_every() <= 0) return;
+    if (!dumping()) return;
+    const double since = std::chrono::duration<double>(std::chrono::steady_clock::now() - f.installed).count();
     const int k = f.next.load();
     if (k == 3 && f.frame_id - f.armed_at > 12) {
         for (int i = 0; i < 3; ++i) {
@@ -325,13 +361,17 @@ void dump_tick(Ffx& f, VkExtent2D bb, VkFormat fmt) {
             }
             char name[96];
             std::snprintf(name, sizeof name, "fg_%06llu_%d_%s.png", static_cast<unsigned long long>(f.armed_at), i, sl.generated ? "generated" : "real");
+            if (i == 0) NXLOG_I(kTag, "FSR 3 frame generation: dump %d at %.1f s after the swapchain install", f.dumps + 1, since);
             gfx::save_png_rgba(name, px.data(), sl.w, sl.h);
             NXLOG_I(kTag, "FSR 3 frame generation: wrote %s (frame %llu)", name, static_cast<unsigned long long>(sl.frame));
         }
         f.next.store(-1);
         ++f.dumps;
     }
-    if (k == -1 && f.dumps < 4 && f.frame_id % static_cast<uint64_t>(dump_every()) == 0) {
+    const std::vector<double>& at = dump_at();
+    const bool due = dump_every() > 0 ? f.dumps < 4 && f.frame_id % static_cast<uint64_t>(dump_every()) == 0
+                                      : static_cast<size_t>(f.dumps) < at.size() && since >= at[static_cast<size_t>(f.dumps)];
+    if (k == -1 && due) {
         const VkDeviceSize size = static_cast<VkDeviceSize>(bb.width) * bb.height * 4;
         for (Ffx::Slot& sl : f.slot) {
             if (sl.buf.buffer && sl.buf.size >= size) continue;
@@ -345,6 +385,8 @@ void dump_tick(Ffx& f, VkExtent2D bb, VkFormat fmt) {
 
 ffxReturnCode_t fg_dispatch(ffxDispatchDescFrameGeneration* params, void* ctx) {
     step("first interpolation dispatch (present thread)");
+    // the game's camera cut (its DLSS reset): the frame between the old view and the new one is not interpolated from the old one
+    if (g().reset_pending.exchange(false)) params->reset = true;
     const ffxReturnCode_t r = g().dispatch(static_cast<ffxContext*>(ctx), &params->header);
     step("first interpolation dispatch done");
     return r;
@@ -421,14 +463,18 @@ bool ensure_fg_context(const FfxFgFrame& fr) {
 
 }  // namespace
 
+bool ffx_fg_files() { return !ffx_find_framegen().dll.empty(); }
+
 bool ffx_fg_wanted() {
     static const bool v = [] {
         if (framegen_mode() != 3) return false;
-        if (find_dll().empty()) {
-            NXLOG_W(kTag, "[dlss] frame_gen = fsr3: amd_fidelityfx_vk.dll (FidelityFX SDK v1.1.4) not found: put it in upscalers\\fsr3 next to the "
-                          "executable or name it in [dlss] frame_gen_dll");
+        const FfxFind f = ffx_find_framegen();
+        if (f.dll.empty()) {
+            NXLOG_W(kTag, "[dlss] frame_gen = fsr3, but %s: put it in upscalers\\fsr next to the launcher (the release package has it there) or "
+                          "name its folder in [dlss] frame_gen_dll; frame generation stays off", f.missing.c_str());
             return false;
         }
+        NXLOG_I(kTag, "FSR 3 frame generation: %s", ffx_narrow(f.dll).c_str());
         return true;
     }();
     return v;
@@ -447,6 +493,7 @@ void ffx_fg_install(gfx::Device& dev, uint32_t extra_queues) {
     if (extra_queues < 3 || !load()) return;
     Ffx& f = g();
     f.dev = &dev;
+    f.installed = std::chrono::steady_clock::now();
     const uint32_t fam = dev.queue_family();
     f.game = {dev.queue(), fam, nullptr};   // FFX uses it only inside vkQueuePresentKHR, which the renderer calls under its queue lock
     VkQueue q[3] = {};
@@ -481,7 +528,7 @@ bool ffx_fg_frame(VkCommandBuffer cb, const FfxFgFrame& fr) {
     c.header.type = FFX_API_CONFIGURE_DESC_TYPE_FRAMEGENERATION;
     c.swapChain = reinterpret_cast<void*>(f.sc);
     c.frameGenerationCallback = &fg_dispatch;
-    if (dump_every() > 0) c.presentCallback = &compose;
+    if (dumping()) c.presentCallback = &compose;
     c.frameGenerationCallbackUserContext = &f.fg_ctx;
     c.frameGenerationEnabled = gen;
     c.allowAsyncWorkloads = false;
@@ -514,6 +561,7 @@ bool ffx_fg_frame(VkCommandBuffer cb, const FfxFgFrame& fr) {
         p.motionVectorScale = {fr.mv_scale[0], fr.mv_scale[1]};
         p.frameTimeDelta = fr.frame_ms;
         p.unused_reset = fr.reset;
+        if (fr.reset) f.reset_pending.store(true);
         p.cameraNear = 0.1f;
         p.cameraFar = 1000.0f;
         p.cameraFovAngleVertical = 1.0f;
@@ -531,6 +579,11 @@ bool ffx_fg_frame(VkCommandBuffer cb, const FfxFgFrame& fr) {
     dump_tick(f, fr.bb, f.format);
     ++f.frame_id;
     return true;
+}
+
+bool ffx_fg_owns_swapchain() {
+    Ffx& f = g();
+    return f.sc_ctx && f.sc && !f.failed;
 }
 
 uint64_t ffx_fg_present_count() {

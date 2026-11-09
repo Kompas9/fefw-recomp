@@ -119,6 +119,10 @@ struct MouseSettings {
     bool invert_x = false;
     bool menu_cursor = true;                       // in menus the mouse is a pointer: cursor, hover, click, right click, wheel
     bool wheel_cycles = true;                       // the wheel cycles set A (mpr: the beams; the SetANext / SetAPrev bindings stay either way)
+    // The Joy-Con 2 mouse (hid jc2_mouse.h, [input] jc2_mouse): what the PC mouse sends the game as a Joy-Con 2 (R) mouse.
+    double jc2_speed = 1.0;                         // pointer units per mouse count (the game's own mouse settings scale it further)
+    double jc2_wake = 8.0;                          // mouse counts within 0.25 s that switch the game to its mouse controls
+    bool jc2_capture = true;                        // capture the mouse while the game is in its mouse controls (raw motion, no OS cursor)
 };
 // ---- pad button remapping ------------------------------------------------------------------------------------------------------------
 // The physical buttons of an SDL gamepad, named by position (the face buttons by where they sit, so the names do not depend on the printed

@@ -3,6 +3,7 @@
 //! repository's own lift and build scripts on this PC, writes fefw.ini in a run folder and starts the game. It ships no game files.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod cpu;
 mod dump;
 mod ini;
 mod nup;
@@ -250,6 +251,85 @@ fn write_settings(app: AppHandle, edits: Vec<settings::Edit>) -> Result<(), Stri
     settings::apply(&game_dir_of(&cfg, &need_repo(&cfg)?), &edits)
 }
 
+/// What one upscaler / frame generation feature finds (Settings): `found` only when every file it needs is in one folder.
+#[derive(Serialize)]
+struct FeatureFiles {
+    found: bool,
+    /// the folder the game will use (found), or the files missing and where they were looked for
+    detail: String,
+}
+
+#[derive(Serialize)]
+struct UpscalerFiles {
+    fsr_upscaling: FeatureFiles,
+    fsr_framegen: FeatureFiles,
+    dlss: FeatureFiles,
+    dlss_framegen: FeatureFiles,
+}
+
+/// The folders the game searches (runtime/src/gfx/extras/ffx_files.cpp, temporal_dlss.cpp): the setting's folder (a file in it counts), then
+/// `upscalers/<sub>` next to the game, next to the launcher and in the run folder.
+fn upscaler_dirs(setting: &str, sub: &str, game: &Path, exe: &Path) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = Vec::new();
+    let s = setting.trim();
+    if !s.is_empty() {
+        let p = PathBuf::from(s);
+        v.push(if p.is_file() { p.parent().map(|d| d.to_path_buf()).unwrap_or(p) } else { p });
+    }
+    for base in [exe.parent().map(|d| d.to_path_buf()).unwrap_or_default(), exe_dir(), game.to_path_buf()] {
+        let d = base.join("upscalers").join(sub);
+        if !v.contains(&d) {
+            v.push(d);
+        }
+    }
+    v
+}
+
+fn files_in(dirs: &[PathBuf], sets: &[&[&str]], what: &str) -> FeatureFiles {
+    for d in dirs {
+        for set in sets {
+            if set.iter().all(|f| d.join(f).is_file()) {
+                return FeatureFiles { found: true, detail: dump::fwd(d) };
+            }
+        }
+    }
+    // the first folder holding any of the files says which ones it lacks
+    for d in dirs {
+        let set = sets[0];
+        let have: Vec<&str> = set.iter().copied().filter(|f| d.join(f).is_file()).collect();
+        if !have.is_empty() {
+            let lack: Vec<&str> = set.iter().copied().filter(|f| !d.join(f).is_file()).collect();
+            return FeatureFiles { found: false, detail: format!("{} lacks {}", dump::fwd(d), lack.join(", ")) };
+        }
+    }
+    FeatureFiles { found: false, detail: format!("{} not found in {}", what, dirs.iter().map(|d| dump::fwd(d)).collect::<Vec<_>>().join(", ")) }
+}
+
+#[tauri::command]
+fn upscaler_files(app: AppHandle, fsr_dir: String, dlss_dir: String) -> Result<UpscalerFiles, String> {
+    let cfg = load_config(&app);
+    let repo = need_repo(&cfg)?;
+    let game = game_dir_of(&cfg, &repo);
+    let exe = if package_tools().is_some() { game.join("fefw.exe") } else { setup::exe_path(&repo) };
+    let fsr = upscaler_dirs(&fsr_dir, "fsr", &game, &exe);
+    // Streamline: the game takes the setting's folder, else the first default folder holding sl.interposer.dll, and needs every file there
+    let sl = upscaler_dirs(&dlss_dir, "streamline", &game, &exe);
+    let sl_pick: Vec<PathBuf> = if !dlss_dir.trim().is_empty() {
+        sl[..1].to_vec()
+    } else {
+        sl.iter().find(|d| d.join("sl.interposer.dll").is_file()).cloned().map(|d| vec![d]).unwrap_or(sl.clone())
+    };
+    const DLSS: [&str; 4] = ["sl.interposer.dll", "sl.common.dll", "sl.dlss.dll", "nvngx_dlss.dll"];
+    const DLSS_G: [&str; 9] =
+        ["sl.interposer.dll", "sl.common.dll", "sl.dlss.dll", "nvngx_dlss.dll", "sl.dlss_g.dll", "sl.reflex.dll", "sl.pcl.dll", "nvngx_dlssg.dll", "NvLowLatencyVk.dll"];
+    Ok(UpscalerFiles {
+        fsr_upscaling: files_in(&fsr, &[&["amd_fidelityfx_upscaler_vk.dll"], &["amd_fidelityfx_vk.dll"]], "amd_fidelityfx_upscaler_vk.dll"),
+        fsr_framegen: files_in(&fsr, &[&["amd_fidelityfx_vk.dll"]], "amd_fidelityfx_vk.dll (FidelityFX SDK v1.1.4)"),
+        dlss: files_in(&sl_pick, &[&DLSS], "the Streamline files"),
+        dlss_framegen: files_in(&sl_pick, &[&DLSS_G], "the Streamline frame generation files"),
+    })
+}
+
 #[derive(Serialize)]
 struct SetupStatus {
     progress: setup::Progress,
@@ -260,6 +340,8 @@ struct SetupStatus {
     jobs: usize,
     /// running from the release package (no build tools needed)
     package: bool,
+    /// why this PC's processor cannot run the compiled game (missing FMA3 / AVX / CMPXCHG16B), if it cannot
+    cpu_problem: Option<String>,
 }
 
 #[tauri::command]
@@ -277,6 +359,7 @@ fn setup_status(app: AppHandle, state: State<Arc<setup::Shared>>) -> SetupStatus
         progress,
         tools: setup::check_tools(package_tools().is_some()),
         package: package_tools().is_some(),
+        cpu_problem: cpu::check(),
         log: state.log.lock().unwrap().iter().cloned().collect(),
         jobs: jobs_of(&cfg),
     }
@@ -284,6 +367,9 @@ fn setup_status(app: AppHandle, state: State<Arc<setup::Shared>>) -> SetupStatus
 
 #[tauri::command]
 fn start_setup(app: AppHandle, state: State<Arc<setup::Shared>>) -> Result<(), String> {
+    if let Some(why) = cpu::check() {
+        return Err(why);
+    }
     let cfg = load_config(&app);
     let p = paths(&cfg)?;
     {
@@ -481,6 +567,7 @@ fn main() {
             save_dump,
             read_settings,
             write_settings,
+            upscaler_files,
             setup_status,
             start_setup,
             cancel_setup,

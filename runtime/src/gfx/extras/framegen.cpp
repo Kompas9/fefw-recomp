@@ -91,12 +91,14 @@ struct State {
     FfxFgFrame ffx;                     // FSR 3: this frame's inputs, used at the present
     VkImage ffx_hudless = VK_NULL_HANDLE;
     uint64_t last_present_ns = 0, ffx_count0 = 0;
+    bool vsync_paused = false, pace_told = false;   // framegen_pace
 };
 State& st() {
     static State s;
     return s;
 }
 std::atomic<int> g_api_error{0};
+std::atomic<uint64_t> g_sleep_ns{0};   // the last Reflex sleep (DLSS-G), for [nvn] frame_csv
 
 void on_api_error(const sl::APIError& e) { g_api_error.store(static_cast<int>(e.vkRes), std::memory_order_relaxed); }
 
@@ -146,7 +148,9 @@ void open_frame(State& s) {
     if (!s.markers) return;
     sl::FrameToken* t = nullptr;
     if (s.f.token(t, &s.index) != sl::Result::eOk || !t) return;
+    const uint64_t t0 = FrameLimiter::now_ns();
     s.f.reflex_sleep(*t);
+    g_sleep_ns.store(FrameLimiter::now_ns() - t0, std::memory_order_relaxed);
     s.f.marker(sl::PCLMarker::eSimulationStart, *t);
     s.f.marker(sl::PCLMarker::eSimulationEnd, *t);
     s.f.marker(sl::PCLMarker::eRenderSubmitStart, *t);
@@ -308,6 +312,30 @@ void report(State& s) {
 }  // namespace
 
 int framegen_mode() { return fg_setting(); }
+uint64_t framegen_take_sleep_ns() { return g_sleep_ns.exchange(0, std::memory_order_relaxed); }
+
+double framegen_pace(double game_fps, bool fifo, float refresh_hz) {
+    State& s = st();
+    bool paused = false;
+    double out = game_fps;
+    if (fifo && refresh_hz > 0 && framegen_running()) {
+        const double half = static_cast<double>(refresh_hz) * 0.5 * 0.9995;
+        if (game_fps > 0 && half < game_fps * 0.95) paused = true;
+        else out = game_fps > 0 ? std::min(game_fps, half) : half;
+    }
+    if (paused != s.vsync_paused || (fifo && refresh_hz > 0 && game_fps > 0 && !s.pace_told)) {   // the game's rate known: one line
+        s.pace_told = s.pace_told || (fifo && refresh_hz > 0 && game_fps > 0);
+        if (paused)
+            NXLOG_W(kTag, "frame generation paused: vsync is on and the display's %.0f Hz cannot show two frames for each of the game's %.0f: "
+                          "turn vsync off (or use a display of at least %.0f Hz) to use it", refresh_hz, game_fps, game_fps * 2.0);
+        else if (fifo && refresh_hz > 0)
+            NXLOG_I(kTag, "frame generation with vsync on a %.0f Hz display: the game renders at most %.2f fps (just under half the refresh rate)",
+                    refresh_hz, static_cast<double>(refresh_hz) * 0.5 * 0.9995);
+    }
+    s.vsync_paused = paused;
+    return out;
+}
+bool framegen_vsync_paused() { return st().vsync_paused; }
 bool framegen_requested() { return fg_setting() != 0; }
 bool framegen_dlss() { return dlss_fg(); }
 bool framegen_running() { return fg_setting() == 3 ? ffx_fg_present_count() > 0 || st().fg : st().fg; }
@@ -458,7 +486,7 @@ void ffx_present_begin(State& s, VkCommandBuffer cb, VkExtent2D backbuffer, cons
     FfxFgFrame f = s.ffx;
     f.frame_ms = s.last_present_ns ? static_cast<float>(std::clamp(static_cast<double>(now - s.last_present_ns) * 1e-6, 1.0, 100.0)) : 16.7f;
     s.last_present_ns = now;
-    const bool want = s.inputs && !again;
+    const bool want = s.inputs && !again && !s.vsync_paused;
     s.streak = want ? s.streak + 1 : 0;
     f.enable = want && s.streak >= 2;
     f.inputs = s.inputs;
@@ -485,7 +513,7 @@ void framegen_present_begin(VkCommandBuffer cb, VkExtent2D backbuffer, VkExtent2
     if (s.fg) {
         int32_t rect[4];
         picture_rect(backbuffer, src, crop, keep_aspect, rect);
-        const bool want = s.inputs && !again && fg_setting() == 1 &&
+        const bool want = s.inputs && !again && fg_setting() == 1 && !s.vsync_paused &&
                           backbuffer.width >= s.min_dimension && backbuffer.height >= s.min_dimension;
         s.streak = want ? s.streak + 1 : 0;
         const bool on = want && s.streak >= 2;

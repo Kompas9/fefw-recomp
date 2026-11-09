@@ -68,6 +68,10 @@ pub fn start(app: &AppHandle, exe: &Path, game_dir: &Path, minimize: bool) -> Re
         let mut cmd = Command::new(&exe);
         // fefw.exe reads fefw.ini from its working directory: every path comes from there
         cmd.current_dir(&dir);
+        // the upscaler DLLs ship next to the launcher (upscalers/fsr, upscalers/streamline), which need not be the run folder
+        if let Some(d) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
+            cmd.env("NXRT_LAUNCHER_DIR", d);
+        }
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -97,6 +101,7 @@ pub fn start(app: &AppHandle, exe: &Path, game_dir: &Path, minimize: bool) -> Re
         let message = match (&wait_err, code) {
             (Some(e), _) => format!("Lost track of fefw.exe: {e}"),
             (None, Some(0)) => "fefw.exe exited normally.".to_string(),
+            (None, Some(4)) => "fefw.exe stopped before the game started: this processor lacks FMA3, AVX or CMPXCHG16B, which the game needs (an Intel Haswell or AMD Piledriver, 2012-2013, or newer). fefw_fatal.txt says which.".to_string(),
             (None, Some(c)) => format!("fefw.exe exited with code {} (0x{:08X}).", c, c as u32),
             (None, None) => "fefw.exe was ended by the system.".to_string(),
         };

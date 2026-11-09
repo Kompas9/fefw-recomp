@@ -32,6 +32,7 @@
 #include "imgui.h"
 #include "imgui_internal.h"   // NavMoveRequestCancel: left / right change a value instead of moving the cursor
 #include "extras/framegen.h"
+#include "extras/framegen_ffx.h"
 #include "extras/temporal.h"
 #include "nxrt/audio_sink.h"
 #include "nxrt/config.h"
@@ -40,6 +41,7 @@
 #include "nxrt/gauge.h"
 #include "nxrt/gfx.h"
 #include "nxrt/input_source.h"
+#include "nxrt/jc2_mouse.h"
 #include "nxrt/log.h"
 #include "nxrt/lowlat.h"
 #include "nxrt/overlay.h"
@@ -98,6 +100,7 @@ constexpr IniKey kIni[] = {
     {"log", "level", "info", Norm::Text, false, "log level"},
     {"gfx", "log_fps", "0", Norm::Bool, true, "frame rate log"},
     {"play", "log_status", "0", Norm::Bool, true, "play status log"},
+    {"input", "jc2_mouse", "auto", Norm::Text, false, "mouse controls"},
     {"diag", "hitch_summary_s", "10", Norm::Number, true, "frame summary log"},
 };
 
@@ -595,7 +598,8 @@ void upscaler_group(Menu& m) {
         const IniKey& up = *ini_key("dlss", "upscaler");
         ini_combo_row(m, up, "Upscaler",
                       "What answers the game's DLSS calls. TAAU needs nothing; DLSS needs an RTX GPU and the Streamline DLLs ([upscale] dlss_dll); "
-                      "FSR 3 the FidelityFX DLLs ([upscale] fsr_dll). One that cannot run falls back to TAAU and says so in the log. "
+                      "FSR 3 runs on any GPU with AMD's FidelityFX DLLs (upscalers\\fsr in the release package, or [upscale] fsr_dll). One that "
+                      "cannot run falls back to TAAU and the log names the missing file. "
                       "Choosing DLSS (or Auto with the DLLs present) takes effect at the next start.",
                       kUpscalerNames, kUpscalerVals, 5);
         const std::string u = lower(ini_now(up));
@@ -611,8 +615,9 @@ void upscaler_group(Menu& m) {
         const IniKey& fg = *ini_key("dlss", "frame_gen");
         {
             row(m, "Frame generation", When::Restart,
-                "One generated frame per rendered frame. Keep vsync and low latency off. DLSS-G needs an RTX 40 or newer GPU, the Streamline "
-                "DLLs and Windows' hardware-accelerated GPU scheduling; FSR 3 needs amd_fidelityfx_vk.dll v1.1.4 ([dlss] frame_gen_dll).");
+                "One generated frame per rendered frame; the HUD is taken from the real frame. Keep vsync and low latency off. DLSS-G needs "
+                "an RTX 40 or newer GPU, the Streamline DLLs (with the five frame generation adds) and Windows' hardware-accelerated GPU "
+                "scheduling; FSR 3 runs on any GPU and needs amd_fidelityfx_vk.dll v1.1.4 (in upscalers\\fsr of the release package).");
             if (!env_locked(fg)) {
                 std::string v = lower(ini_now(fg));
                 if (v == "1") v = "dlss";
@@ -627,11 +632,18 @@ void upscaler_group(Menu& m) {
         end_rows();
     }
     const char* in_use = nvn::be::dlss_upscaler_in_use();
-    ImGui::TextDisabled("Running: %s; frame generation %s. DLLs found: DLSS %s, FSR 3 %s.", in_use ? in_use : "no DLSS call yet",
-                        extras::framegen_running() ? "on" : extras::framegen_requested() ? "asked for, not running (see the log)" : "off",
-                        extras::temporal_dlss_available() ? "yes" : "no", extras::temporal_ffx_available() ? "yes" : "no");
+    ImGui::TextDisabled("Running: %s; frame generation %s.", in_use ? in_use : "no DLSS call yet",
+                        extras::framegen_vsync_paused() ? "paused: vsync is on and the display is under twice the game's frame rate"
+                        : extras::framegen_running()    ? "on"
+                        : extras::framegen_requested()  ? "asked for, not running (see the log)"
+                                                        : "off");
+    // "found" only when every file the feature needs is there (the log names a missing one)
+    ImGui::TextDisabled("Files found: DLSS %s, DLSS-G %s, FSR 3 upscaling %s, FSR 3 frame generation %s.",
+                        extras::temporal_dlss_available() ? "yes" : "no", extras::streamline_framegen_files() ? "yes" : "no",
+                        extras::temporal_ffx_available() ? "yes" : "no", extras::ffx_fg_files() ? "yes" : "no");
     if (extras::framegen_requested() && (m.edit.display.vsync || m.edit.extras.latency.mode != extras::LatencyMode::Off))
-        ImGui::TextColored(kOrange, "Frame generation wants vsync and low latency off (Frame rate tab).");
+        ImGui::TextColored(kOrange, "Frame generation works best with vsync and low latency off (Frame rate tab). With vsync on, the game renders at "
+                                    "most half the display's refresh rate.");
 }
 
 void hdr_group(UiHost& host, Menu& m) {
@@ -746,7 +758,7 @@ void framerate_page(UiHost& host, Menu& m, const play::LiveStatus& live, gfx::Ov
         } else {
             ImGui::TextDisabled("set by the environment (%s / %s)", config_env_name("fefw", "fps60").c_str(), config_env_name("fefw", "fps120").c_str());
         }
-        constexpr const char* kSmooth[] = {"Auto (on at 120)", "On", "Off"};
+        constexpr const char* kSmooth[] = {"Auto (on at 60 and 120)", "On", "Off"};
         constexpr const char* kSmoothVals[] = {"auto", "1", "0"};
         ini_combo_row(m, *ini_key("fefw", "smooth_step"), "Smooth time step",
                       "Keeps the game clock exact when frames are uneven: the game's step plus a quarter of the time it still owes.", kSmooth,
@@ -781,7 +793,15 @@ void framerate_page(UiHost& host, Menu& m, const play::LiveStatus& live, gfx::Ov
             d.fps_cap = kFpsChoices[idx];
             apply(host, m);
         }
-        if (ck.fps120 && d.fps_cap > 0 && d.fps_cap < 120) ImGui::TextColored(kOrange, "120 fps gameplay needs a limit of 120 or more.");
+        {
+            const int want = ck.fps120 ? 120 : ck.fps60 ? 60 : 0;      // the gameplay rate the hooks installed at start run at
+            const FrameLimiter* l = ov.context().limiter;
+            if (want > 0 && d.fps_cap > 0 && d.fps_cap < want)
+                ImGui::TextColored(kOrange, "%d fps gameplay raises this limit to %d fps while it is on (the setting itself stays %d).", want, want, d.fps_cap);
+            else if (want > 0 && l && l->target_fps() > 0 && l->target_fps() < want - 1)
+                ImGui::TextColored(kOrange, "%d fps gameplay is held to %.0f fps by %s: use a faster display, or turn vsync off and set a limit of %d or more.",
+                                   want, l->target_fps(), d.vsync ? "vsync and the display's refresh rate" : "the display's refresh rate (limit: Refresh rate)", want);
+        }
         row(m, "Low latency", When::Restart, "NVIDIA Reflex or AMD Anti-Lag 2, whichever the GPU has. Keep it off with frame generation.");
         int lat = static_cast<int>(m.edit.extras.latency.mode);
         if (combo(m, "##lat", &lat, kLatencyNames, 4)) {
@@ -904,6 +924,41 @@ void keyboard_section(Menu& m) {
     end_rows();
 }
 
+// The mouse is the game's own Joy-Con 2 mouse (hid jc2_mouse.h): the game runs its mouse controls with its own settings, and these rows
+// set what the PC mouse sends it.
+void mouse_section(UiHost& host, Menu& m) {
+    section("Mouse");
+    ImGui::TextWrapped("The mouse works as the game's Joy-Con 2 mouse: move it and the game switches to its mouse controls (camera in "
+                       "bases and dungeons, map cursor in battle, selection in menus); press a key or use the controller and it switches back. "
+                       "The game's own speeds are the (Mouse) rows of its System > Settings; System > Mouse Controls lists every button.");
+    play::MouseSettings& ms = m.edit.mouse;
+    if (begin_rows("mouse")) {
+        constexpr const char* kNames[] = {"Automatic (the last device used)", "Always the mouse", "Off"};
+        constexpr const char* kVals[] = {"auto", "on", "off"};
+        const IniKey& k = *ini_key("input", "jc2_mouse");
+        ini_combo_row(m, k, "Mouse controls", "Automatic: moving or clicking the mouse switches the game to its mouse controls, a key or "
+                      "the controller switches back. Always: the game stays in its mouse controls. Off: the game never sees a mouse.",
+                      kNames, kVals, 3);
+        const std::string v = lower(ini_now(k));
+        const hid::Jc2MouseMode want = v == "off" ? hid::Jc2MouseMode::Off : v == "on" ? hid::Jc2MouseMode::On : hid::Jc2MouseMode::Auto;
+        if (want != hid::jc2_mouse_mode()) hid::jc2_mouse_set_mode(want);
+        row(m, "Mouse speed", When::Live, "How far the game's cursor and camera move per mouse count, before the game's own speed settings.");
+        if (slider(m, "##jc2s", &ms.jc2_speed, 0.25, 4.0, 0.05, "%.2fx", nullptr, ImGuiSliderFlags_Logarithmic)) apply(host, m);
+        row(m, "Wake distance", When::Live, "How far the mouse must move (counts, within a quarter second) to switch to mouse controls.");
+        if (slider(m, "##jc2w", &ms.jc2_wake, 0.0, 100.0, 1.0, "%.0f")) apply(host, m);
+        row(m, "Capture the mouse", When::Live, "While the game is in its mouse controls the Windows pointer is hidden and held in the "
+            "window (the game draws its own cursor). A key, the controller, Alt+Tab or F1 frees it.");
+        if (check(m, "##jc2c", &ms.jc2_capture)) apply(host, m);
+        const MouseInfo mi = mouse_info();
+        const hid::Jc2Stats js = hid::jc2_mouse_stats();
+        row(m, "Now", When::Info, nullptr);
+        ImGui::AlignTextToFramePadding();
+        if (!mi.valid) ImGui::TextDisabled("the game has not set up its mouse yet");
+        else ImGui::Text("%s (mouse used %llu times)", mi.mode ? "mouse controls" : "buttons", static_cast<unsigned long long>(js.engages));
+        end_rows();
+    }
+}
+
 void controls_page(UiHost& host, Menu& m, const play::LiveStatus& live) {
     play::PadSettings& p = m.edit.pad;
     section("Controller");
@@ -938,6 +993,7 @@ void controls_page(UiHost& host, Menu& m, const play::LiveStatus& live) {
     }
     if (live.pads == 0) ImGui::TextDisabled("No controller connected.");
     else ImGui::TextDisabled("%d connected: %s (rumble %s)", live.pads, live.pad_name.c_str(), live.pad_rumble ? "yes" : "no");
+    mouse_section(host, m);
 
     section("Button mapping");
     ImGui::TextWrapped("What each controller button presses on the Switch pad. Default keeps the layout above.");

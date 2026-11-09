@@ -89,7 +89,8 @@ std::vector<Binding> bindings_in(const Settings& s, int ctx) {
 bool same_settings(const Settings& a, const Settings& b) {
     const MouseSettings &ma = a.mouse, &mb = b.mouse;
     if (!(ma.yaw_rad == mb.yaw_rad && ma.pitch_rad == mb.pitch_rad && ma.invert_y == mb.invert_y && ma.invert_x == mb.invert_x &&
-          ma.menu_cursor == mb.menu_cursor && ma.wheel_cycles == mb.wheel_cycles))
+          ma.menu_cursor == mb.menu_cursor && ma.wheel_cycles == mb.wheel_cycles && ma.jc2_speed == mb.jc2_speed &&
+          ma.jc2_wake == mb.jc2_wake && ma.jc2_capture == mb.jc2_capture))
         return false;
     if (a.aim.lock_mode != b.aim.lock_mode || a.aim.free_lock_margin != b.aim.free_lock_margin || a.camera.gun_drives_view != b.camera.gun_drives_view)
         return false;
@@ -507,6 +508,24 @@ NXTEST(menu_cursor_parses_and_round_trips) {
     REQUIRE_MSG(parse_settings(text, &r, &err), err);
     CHECK(!r.mouse.menu_cursor);
     CHECK(same_settings(s, r));
+}
+
+NXTEST(jc2_mouse_keys_parse_and_round_trip) {
+    Settings s;
+    CHECK(s.mouse.jc2_speed == 1.0 && s.mouse.jc2_wake == 8.0 && s.mouse.jc2_capture);   // the defaults
+    std::string err;
+    std::vector<std::string> w;
+    REQUIRE(parse_settings("[mouse]\njc2_speed = 2.5\njc2_wake = 20\njc2_capture = 0\n", &s, &err, &w));
+    CHECK(w.empty());
+    CHECK(s.mouse.jc2_speed == 2.5 && s.mouse.jc2_wake == 20.0 && !s.mouse.jc2_capture);
+    const std::string text = format_settings(s);
+    CHECK(text.find("jc2_speed = 2.5") != std::string::npos);
+    CHECK(text.find("jc2_capture = 0") != std::string::npos);
+    Settings r;
+    REQUIRE_MSG(parse_settings(text, &r, &err), err);
+    CHECK(same_settings(s, r));
+    Settings bad;
+    CHECK(!parse_settings("[mouse]\njc2_speed = 0\n", &bad, &err, &w) || bad.mouse.jc2_speed == 1.0 || !w.empty());   // out of range
 }
 
 NXTEST(lockfree_parses_and_round_trips) {

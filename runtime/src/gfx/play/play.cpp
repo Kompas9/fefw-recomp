@@ -125,7 +125,7 @@ public:
         hid::NpadInput& n = out.npad[0];
         n.connected = true;
         n.style = hid::NpadStyle::FullKey;
-        n.buttons = pf.buttons | kb.buttons;
+        n.buttons = pf.buttons | kb.buttons | jc2_buttons_.load(std::memory_order_relaxed);
         n.left = combine(pf.left, kb.lx, kb.ly);
         n.right = combine(pf.right, kb.rx, kb.ry);
         n.six_axis = pf.six;
@@ -167,6 +167,8 @@ public:
         *y = right_y_f_.load(std::memory_order_relaxed);
     }
     void set_look_scale(float k) { look_scale_.store(k, std::memory_order_relaxed); }      // the gyro's pitch rate times k (step * 60), for the game's per-call pitch
+    // The Joy-Con 2 mouse's own buttons (its R / ZR under the fingers), which reach the game as npad buttons.
+    void set_jc2_buttons(uint64_t b) { jc2_buttons_.store(b, std::memory_order_relaxed); }
     void set_touch(const Touch& t) {
         std::lock_guard<std::mutex> lk(mu_);
         touch_ = t;
@@ -189,6 +191,7 @@ private:
     std::atomic<float> right_x_f_{0.f}, right_y_f_{0.f};
     std::atomic<float> look_scale_{1.f};
     std::atomic<float> gyro_pitch_{0.f};
+    std::atomic<uint64_t> jc2_buttons_{0};
     std::mutex mu_;
     PadFrame pad_;
     Touch touch_;
@@ -233,7 +236,11 @@ struct G {
     float mouse_x = 0, mouse_y = 0;
     bool mouse1 = false;
     uint32_t jc2_buttons = 0;            // host mouse buttons as nn::hid::MouseButton bits, for the Joy-Con 2 mouse (hid jc2_mouse.h)
+    uint32_t jc2_presses = 0;            // buttons pressed since the last feed
     float jc2_wheel_x = 0, jc2_wheel_y = 0;   // wheel notches since the last feed
+    float jc2_dx = 0, jc2_dy = 0;        // mouse motion since the last feed, raw counts (relative mode) or window pixels
+    bool jc2_captured = false;           // play captured the mouse for the Joy-Con 2 mouse (not for a camera)
+    uint64_t jc2_click_until[2] = {};    // a click shorter than a frame still reaches the game: left (R), right (ZR) held until then
     uint64_t last_status_ns = 0;
     bool warned_thread = false;
 
@@ -304,22 +311,53 @@ void apply_unfocused_mute() {
     audio::set_muted(st.window && st.settings.audio.mute_unfocused && !platform::focused());
 }
 
+// The display's refresh rate for the frame cap. NXRT_FORCE_REFRESH_HZ=<n> (a test hook: check the 60 Hz paths on a faster display) replaces it.
+float cap_refresh_hz(bool window) {
+    static const float forced = [] {
+        const char* e = std::getenv("NXRT_FORCE_REFRESH_HZ");
+        return e ? static_cast<float>(std::atof(e)) : 0.f;
+    }();
+    if (forced > 0.f) return forced;
+    return window ? platform::display_refresh_hz() : 0.f;
+}
+
 void apply_frame_cap(const Settings& s) {
     G& st = g();
     double cap = s.display.fps_cap;
+    const double floor_fps = frame_cap_floor();
+    static double logged_cap = -2, logged_floor = -2;
+    static float logged_hz = -2;
+    const bool changed = cap != logged_cap || floor_fps != logged_floor;
     if (cap < 0) {
         // fps_limit = auto: the display's refresh rate (no limit while it is unknown, e.g. headless runs)
-        const float hz = st.window ? platform::display_refresh_hz() : 0.f;
+        const float hz = cap_refresh_hz(st.window);
         cap = hz > 0 ? static_cast<double>(hz) : 0;
+        if (floor_fps > 0 && cap > 0 && cap < floor_fps && (changed || hz != logged_hz))
+            NXLOG_W(kTag, "the game runs at %.0f fps but [display] fps_limit = auto follows the display's %.0f Hz: at most %.0f fps are presented%s",
+                    floor_fps, cap, cap, s.display.vsync ? " (vsync is on too)" : "; a faster display or a numeric fps_limit lifts it");
+        logged_hz = hz;
+    } else if (floor_fps > 0 && cap > 0 && cap < floor_fps) {
+        if (changed)
+            NXLOG_I(kTag, "[display] fps_limit = %.0f is below the game's %.0f fps: the limit is raised to %.0f for this run (controls.ini keeps %.0f)",
+                    cap, floor_fps, floor_fps, cap);
+        cap = floor_fps;
     }
+    logged_cap = s.display.fps_cap;
+    logged_floor = floor_fps;
     if (s.display.vsync && s.display.fps_cap == 0) {
         cap = 0;     // uncapped with vsync: mailbox presents, no limiter
     } else if (s.display.vsync) {
         // The display paces; a cap only matters when it is below the refresh rate. With no cap below the refresh rate, the frame limiter still keeps just
         // under it (S21, [latency] vsync_cap): the game otherwise renders as fast as the swapchain takes frames, the queue behind the display
         // fills (three images) and every picture is shown one to two frames after it was simulated; just under the refresh rate the queue stays empty.
-        const float hz = st.window ? platform::display_refresh_hz() : 0.f;
+        const float hz = cap_refresh_hz(st.window);
         static const bool vsync_cap = config_get_bool("latency", "vsync_cap", true);
+        static double warned_hz = -1;
+        if (floor_fps > 0 && hz > 0 && hz < floor_fps && warned_hz != hz) {
+            warned_hz = hz;
+            NXLOG_W(kTag, "the game runs at %.0f fps but vsync is on and the display refreshes at %.0f Hz: at most %.0f fps are shown (turn vsync off, "
+                    "or use a faster display)", floor_fps, static_cast<double>(hz), static_cast<double>(hz));
+        }
         if (cap <= 0 || (hz > 0 && cap >= hz)) cap = (vsync_cap && hz > 0) ? static_cast<double>(hz) * 0.9995 : 0;
     }
     st.limiter.set_target_fps(cap);
@@ -333,6 +371,18 @@ void pre_frame(void*) {
     const int want = st.want_present.exchange(-1);
     if (st.renderer && want >= 0) st.renderer->set_present_mode(static_cast<gfx::PresentMode>(want));
     if (st.overlay) st.overlay->apply_present_pending();
+}
+
+// The `mouse <dx> <dy>` test step: the counts go to the camera's accumulator as before and arrive as a relative motion event, as a real
+// mouse's do (the Joy-Con 2 mouse takes its motion from the events).
+void test_mouse_sink(double dx, double dy) {
+    input::mouse_delta_add(dx, dy);
+    input::Event m;
+    m.type = input::EventType::MouseMotion;
+    m.flags = input::kFlagRelative;
+    m.u.motion.dx = static_cast<float>(dx);
+    m.u.motion.dy = static_cast<float>(dy);
+    input::queue_push(m);
 }
 
 bool key_sink(const char* name, bool down) {
@@ -483,7 +533,7 @@ bool game_menu_over_value() {
 bool jc2_owns_clicks() {
     G& st = g();
     static const bool device_only = config_get_str("input", "jc2_clicks", "both") == "device";
-    return device_only && st.engine && ctx_in_play(st.engine->context()) && hid::jc2_mouse_active();
+    return device_only && st.engine && ctx_in_play(st.engine->context()) && hid::jc2_mouse_engaged();
 }
 
 void handle_event(const input::Event& e, uint64_t now) {
@@ -532,6 +582,7 @@ void handle_event(const input::Event& e, uint64_t now) {
                 return;
             }
             if (!(e.flags & input::kFlagRepeat)) mm::pointer().on_other_input();
+            if (!(e.flags & input::kFlagRepeat) && !menu_blocked) hid::jc2_mouse_other_input();   // the last device used wins
             if (!(e.flags & input::kFlagRepeat) && !menu_blocked) st.engine->key(e.u.key.scancode, true, now);
             break;
         case EventType::KeyUp:
@@ -540,6 +591,7 @@ void handle_event(const input::Event& e, uint64_t now) {
         case EventType::MouseButtonDown:
             if (e.u.button.button == 1) st.mouse1 = true;
             st.jc2_buttons |= jc2_button_bit(e.u.button.button);
+            if (!menu_blocked) st.jc2_presses |= jc2_button_bit(e.u.button.button);
             if (!menu_blocked) mm::pointer().on_button(e.u.button.button, true);
             // While the Joy-Con 2 mouse owns the mouse in play, the left and right buttons belong to the device alone (the middle button stays
             // the mouse-mode key). A release is always passed on: it only matters when the press was seen before the device took over.
@@ -572,6 +624,11 @@ void handle_event(const input::Event& e, uint64_t now) {
             break;
         }
         case EventType::MouseMotion:
+            // the Joy-Con 2 mouse moves by the motion, captured (raw counts) or not (window pixels)
+            if (!menu_blocked) {
+                st.jc2_dx += e.u.motion.dx;
+                st.jc2_dy += e.u.motion.dy;
+            }
             if (!(e.flags & input::kFlagRelative)) {
                 st.mouse_x = e.u.motion.x;
                 st.mouse_y = e.u.motion.y;
@@ -634,6 +691,7 @@ void poll_pads(uint64_t now) {
                 st.last_dev = LastDevice::Pad;
                 st.last_pad_kind = static_cast<int>(infos[i].kind);
                 mm::pointer().on_other_input();
+                if (!(st.overlay && st.overlay->blocks_game())) hid::jc2_mouse_other_input();   // the last device used wins
             }
         }
         if (look_ctx) tmp.right = adjust_look_stick(tmp.right, st.settings.pad);
@@ -827,12 +885,36 @@ int update_hook(::Ctx*, uint64_t, void*) {
 
     if (st.window) {
         platform::set_text_input(st.overlay && st.overlay->keyboard_open());   // typed text for the on-screen keyboard only
-        const bool want = st.capture_mouse && platform::focused() && !platform::minimized() && !overlay_visible && playing &&
-                          st.capture_state.load() == 0 && !hid::jc2_mouse_wants_pointer();
+        const bool free_ok = platform::focused() && !platform::minimized() && !overlay_visible && st.capture_state.load() == 0;
+        const bool want_cam = st.capture_mouse && free_ok && playing && !hid::jc2_mouse_wants_pointer();
+        // The Joy-Con 2 mouse on its surface: the game draws its own cursor and turns its camera by the motion, so the mouse is captured
+        // (raw counts, no OS cursor, no window edge) until another device lifts it ([mouse] jc2_capture).
+        const bool want_jc2 = st.settings.mouse.jc2_capture && free_ok && hid::jc2_mouse_engaged();
+        const bool want = want_cam || want_jc2;
         if (want != platform::relative_mouse()) {
             platform::set_relative_mouse(want);
             if (want) input::mouse_delta_take();      // nothing that piled up before the capture
+            // The Joy-Con 2 mouse lifted: the Windows pointer comes back where the game's own pointer is (the game layer says where).
+            float ru = 0, rv = 0;
+            if (!want && st.jc2_captured && hid::jc2_mouse_take_return_point(&ru, &rv)) {
+                mm::Geometry g2;
+                platform::pixel_size(&g2.win_w, &g2.win_h);
+                const DisplayLive dl2 = gp && gp->display_live ? gp->display_live() : DisplayLive{};
+                g2.render_w = dl2.render_w;
+                g2.render_h = dl2.render_h;
+                g2.display_aspect = dl2.aspect > 0 ? dl2.aspect : 0;
+                g2.keep_aspect = st.settings.display.keep_aspect;
+                const mm::Rect r = mm::picture_rect(g2);
+                const float wx = static_cast<float>(r.x + std::clamp(ru, 0.f, 1.f) * r.w), wy = static_cast<float>(r.y + std::clamp(rv, 0.f, 1.f) * r.h);
+                platform::warp_mouse(wx, wy);
+                st.mouse_x = wx;
+                st.mouse_y = wy;
+                if (tt::enabled()) NXLOG_I(kTag, "Windows pointer put back at the game's pointer: %.3f,%.3f on the picture = window %.0f,%.0f", ru, rv, wx, wy);
+            }
+            if (tt::enabled() || want_jc2 != st.jc2_captured)
+                NXLOG_I(kTag, "mouse %s%s", want ? "captured" : "released", want_jc2 ? " (Joy-Con 2 mouse)" : want_cam ? " (camera)" : "");
         }
+        st.jc2_captured = want && want_jc2;
     }
     {   // the map: dragging with the left button rotates it (the left stick), with the middle button moves it (the right stick); the speed is the pointer's speed
         static float px = 0, py = 0;
@@ -878,21 +960,53 @@ int update_hook(::Ctx*, uint64_t, void*) {
         geo.keep_aspect = st.settings.display.keep_aspect;
         if (const Act a = gp && gp->menu_frame ? gp->menu_frame(menu_up, geo) : Act::None; a != Act::None) st.engine->pulse(a, now);
         if (st.overlay && st.pointer_draw) st.overlay->set_pointer(menu_up && ptr.enabled() && ptr.cursor_visible(menu_up), ptr.x(), ptr.y(), true);
-        // In play with the Joy-Con 2 mouse on its surface the game draws its own cursor: the OS cursor is hidden (unless the overlay is up).
-        const bool game_cursor = playing && !overlay_visible && hid::jc2_mouse_active();
+        // With the Joy-Con 2 mouse on its surface the game draws its own cursor: the OS cursor is hidden (unless the overlay is up).
+        const bool game_cursor = !overlay_visible && hid::jc2_mouse_engaged();
         if (st.window && !platform::relative_mouse())
             platform::set_cursor_visible(!game_cursor && (overlay_visible || !(ptr.enabled() && menu_up) || ptr.cursor_visible(menu_up)));
-        if (st.window) {   // the Joy-Con 2 mouse (hid): the pointer on the picture, the buttons and the wheel
+        if (st.window) {   // the Joy-Con 2 mouse (hid): the motion, the buttons and the wheel
             hid::HostMouse hm;
-            bool inside = false;
-            mm::window_to_picture(geo, st.mouse_x, st.mouse_y, &hm.u, &hm.v, &inside);
+            const bool focused = (platform::focused() || tt::enabled()) && !platform::minimized() && !overlay_visible;
+            // motion while the mouse is free counts only over the picture (crossing the window on the way elsewhere wakes nothing)
+            bool inside = true;
+            if (!platform::relative_mouse()) {
+                mm::window_to_picture(geo, st.mouse_x, st.mouse_y, &hm.u, &hm.v, &inside);
+                hm.pointer = inside;
+            }
+            const float k = static_cast<float>(st.settings.mouse.jc2_speed);
+            if (focused && inside) {
+                hm.dx = st.jc2_dx * k;
+                hm.dy = st.jc2_dy * k;
+                hm.wake = std::sqrt(st.jc2_dx * st.jc2_dx + st.jc2_dy * st.jc2_dy);
+            }
             hm.buttons = overlay_visible ? 0u : st.jc2_buttons;
+            hm.presses = focused && inside ? st.jc2_presses : 0u;
             hm.wheel_x = st.jc2_wheel_x;
             hm.wheel_y = st.jc2_wheel_y;
-            hm.focused = (platform::focused() || tt::enabled()) && !platform::minimized() && !overlay_visible;
-            hm.captured = platform::relative_mouse();
+            hm.focused = focused;
+            hid::jc2_mouse_set_wake(static_cast<float>(st.settings.mouse.jc2_wake));
             hid::jc2_mouse_feed(hm);
             st.jc2_wheel_x = st.jc2_wheel_y = 0;
+            st.jc2_dx = st.jc2_dy = 0;
+            st.jc2_presses = 0;
+            // the mouse in use as the Joy-Con 2 mouse: the prompts follow it like any other mouse use
+            const bool engaged = hid::jc2_mouse_engaged();
+            if (engaged && (hm.wake > 0 || hm.presses)) st.last_dev = LastDevice::KeyboardMouse;
+            // Its clicks: a Joy-Con 2 (R) used as a mouse has R under the index finger and ZR under the middle one, and the game reads them
+            // as npad buttons ("Left click (R): Confirm, Right click (ZR): Cancel", 0_ISM_Battle.msbt). Only while the mouse is on its
+            // surface: the click that puts it down is not also a button press. Held at least 50 ms so a quick click is seen.
+            uint64_t clicks = 0;
+            if (engaged && focused) {
+                constexpr uint32_t kBits[2] = {1u << 0, 1u << 1};
+                const uint64_t kNpad[2] = {hid::btn(hid::kBtnR), hid::btn(hid::kBtnZR)};
+                for (int i = 0; i < 2; ++i) {
+                    if (hm.presses & kBits[i]) st.jc2_click_until[i] = now + 50 * kMs;
+                    if ((st.jc2_buttons & kBits[i]) || now < st.jc2_click_until[i]) clicks |= kNpad[i];
+                }
+            } else {
+                st.jc2_click_until[0] = st.jc2_click_until[1] = 0;
+            }
+            st.source_owner->set_jc2_buttons(clicks);
         }
     }
     if (!playing) input::mouse_delta_take();         // aim only counts what arrives while the game is playing (not under one of its menus)
@@ -1234,7 +1348,7 @@ bool start(const StartOptions& opt) {
     st.source = std::shared_ptr<hid::InputSource>(st.source_owner.get(), [](hid::InputSource*) {});   // owned by G
     hid::set_input_source(st.source);
     hid::set_vibration_sink(&vib_sink, nullptr);
-    tt::set_mouse_sink(&input::mouse_delta_add);
+    tt::set_mouse_sink(&test_mouse_sink);
     tt::set_key_sink(&key_sink);
     if (st.renderer) tt::set_screenshot_provider(&screenshot_provider, nullptr);
     if (const std::string script = config_get_str("play", "selftest", ""); !script.empty()) {
@@ -1299,6 +1413,7 @@ bool start(const StartOptions& opt) {
     if (gp && gp->frame_update) st.hook_update = hook_add_entry(st.base + gp->frame_update, &update_hook);
     else NXLOG_W(kTag, "the game (%s) names no frame update: play mode is not pumped", game::info().id);
     if (gp && gp->install) gp->install(st.base, &g_game_host, st.settings);
+    apply_frame_cap(st.settings);      // the game's hooks may have set a frame cap floor (frame_limiter.h)
     st.started = true;
     NXLOG_I(kTag, "play mode started (%s, overlay %s, base 0x%llx, game %s, frame hook %u)", st.window ? "window" : "no window", st.overlay ? "on" : "off",
             static_cast<unsigned long long>(st.base), game::info().id, st.hook_update);

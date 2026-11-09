@@ -23,6 +23,7 @@ software and draws with Vulkan. It is not an emulator.
 ## Requirements
 
 - Windows 10 or 11, 64-bit
+- A CPU with FMA3 and AVX: an Intel Haswell (2013) or newer, or an AMD Piledriver (2012) / Ryzen or newer (Ivy Bridge and Xeon E5 v2, Sandy Bridge and older are not supported; Setup and `fefw.exe` say so instead of crashing)
 - A GPU with Vulkan 1.3 and an up-to-date driver
 - 16 GB of RAM and about 30 GB of free disk space
 - Your own decrypted dump of the game at update **131072**, in one of these forms:
@@ -65,6 +66,24 @@ Then choose **DLSS** (or **Automatic**, which picks DLSS when the files and an R
 restart the game. `fefw.log` says `Streamline ... started` and `DLSS (Streamline)` when it works. The folder can be somewhere else:
 set it under **Settings > Picture > DLSS (Streamline) folder**.
 
+For DLSS frame generation (RTX 40 or newer, with Windows' hardware-accelerated GPU scheduling on) add five more files from the same
+folder: `sl.dlss_g.dll`, `sl.reflex.dll`, `sl.pcl.dll`, `nvngx_dlssg.dll` and `NvLowLatencyVk.dll`.
+
+### FSR 3 (any GPU)
+
+AMD's signed FSR files come with the release, in `upscalers\fsr` next to `fefw-launcher.exe`, so nothing needs downloading:
+
+```
+amd_fidelityfx_upscaler_vk.dll   amd_fidelityfx_loader_vk.dll   FSR 3 upscaling (FSR SDK v2.4.0; FSR 4 where AMD offers it)
+amd_fidelityfx_vk.dll                                            FSR 3 frame generation (FidelityFX SDK v1.1.4)
+```
+
+Choose **AMD FSR 3 upscaling** as the Upscaler and/or **AMD FSR 3 frame generation** under **Settings > Frame rate**, then restart
+the game. Frame generation adds one generated frame between two real ones; the HUD and text are taken from the real frames, so they
+stay sharp. It works best with VSync off on a 120 Hz or faster display: with VSync on the game renders at most half the refresh
+rate, and on a display slower than twice the game's frame rate generation pauses. **Settings > Picture > FSR 3 (AMD) folder** shows
+whether the files are found, and can point to another folder. If a file is missing, `fefw.log` names it and the game carries on with TAAU (or without frame generation).
+
 ### Keyboard and controller
 
 Any controller works, and so does the keyboard, with no setup. The button prompts in the game follow the one you used last: press a
@@ -104,6 +123,27 @@ Left side: a key name (`Return`, `Space`, `Left Shift`, `Up`, `Keypad 8` ...). R
 switch a key off. An older `controls.ini` gets the keys above added at the next start (only keys you have not bound yourself; the
 old file is kept as `controls.ini.bak`). To go back to the default keys, delete the `[bindings.*]` sections. Controller options (stick dead zones,
 button mapping, prompts) are under **Settings** and **F1 > Controls**.
+
+### Mouse
+
+The game has its own mouse controls, made for the Switch 2's Joy-Con 2 used as a mouse, and the PC mouse drives them. Move the mouse
+or click and the game switches to its mouse controls (its prompts show mouse buttons); press a key or touch the controller and it
+switches straight back. Whichever you used last is in control.
+
+- **Bases, dungeons:** the mouse turns the camera, left click talks, opens and attacks, right click cancels or opens the menu, the
+  wheel zooms the camera while standing still. Walk with WASD or the stick.
+- **Battle maps:** the mouse moves the map cursor (faster when you move it faster), left click selects and confirms, right click
+  cancels.
+- **Menus:** moving the mouse up or down moves the selection, left click confirms, right click goes back.
+
+While the game is in its mouse controls the Windows pointer is hidden and kept in the window (it comes back where the game's pointer
+was). A key, the controller, **Alt+Tab** or **F1** frees it. The game's own **System > Mouse Controls** page shows every button, and
+its **System > Settings** set the speeds: the rows marked (Mouse) on the General, Battle and Bases/Dungeons tabs (camera
+sensitivity, map cursor speed, menu cursor speed), and **Method for Switching to Mouse**, which should stay automatic. Leave the
+game's angle calibration alone (a desk mouse needs none; **Reset Calibration** undoes it). **F1 > Controls > Mouse** has the PC side:
+mouse controls automatic, always or off, and the mouse speed before the game's own (`[mouse] jc2_speed` in `controls.ini`).
+
+On battle maps, hold **Y** (keyboard **F**) to move the cursor faster with the stick or keys.
 
 ### DLC
 
@@ -162,8 +202,8 @@ This project stands on the work of others. Thank you.
   Vulkan-Headers (Apache-2.0 or MIT).
 - [astc-encoder](https://github.com/ARM-software/astc-encoder) (Apache-2.0), [bc7enc_rdo](https://github.com/richgel999/bc7enc_rdo)
   (MIT or public domain), ISPC (BSD-3-Clause).
-- AMD FidelityFX SDK headers and FSR (MIT), NVIDIA Image Scaling (MIT), NVIDIA Streamline headers (MIT). No NVIDIA or AMD binaries are
-  included; DLSS is not used or distributed.
+- AMD FidelityFX / FSR SDK headers, FSR and AMD's signed FSR DLLs in `upscalers\fsr` (MIT; `licenses\LICENSE.AMD-*`),
+  NVIDIA Image Scaling (MIT), NVIDIA Streamline headers (MIT). No NVIDIA binaries are included; DLSS is not distributed.
 - [Sascha Willems' Vulkan samples](https://github.com/SaschaWillems/Vulkan) (MIT): the stand-in shader test corpus.
 - [Kenney input prompts](https://kenney.nl/assets/input-prompts) (CC0), DejaVu fonts, [Tauri](https://tauri.app), [Lucide](https://lucide.dev) icons (ISC).
 

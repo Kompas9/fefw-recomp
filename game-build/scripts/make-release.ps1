@@ -9,7 +9,8 @@
 #   fefw-launcher.exe           built here (npm, Rust) with the build machine's paths remapped, unless -Launcher names one
 #   the shader translator       staged Ryujinx sources (tools\shaders\scripts\setup_ryujinx.ps1); this script runs dotnet publish
 # Third-party payload, downloaded into the cache folder from the official sites: Zig (checked against ziglang.org's sha256), the Python
-# embeddable package, and the wheels of capstone, lz4, zbic and zstandard (pip, for CPython 3.13 win_amd64).
+# embeddable package, the wheels of capstone, lz4, zbic and zstandard (pip, for CPython 3.13 win_amd64), and AMD's signed FSR DLLs with
+# their licence files (FidelityFX SDK repository at pinned tags, sha256 and AMD signature checked).
 param(
     [Parameter(Mandatory)][string]$Version,
     [string]$Out = "",
@@ -18,6 +19,14 @@ param(
     [string]$ZigVersion = "0.17.0",
     [string]$ZigSha256 = "b5663f69581dcf391293fbf16c06cb80d81d806545ce618b4d0bab7f0eb8c428",
     [string]$PythonVersion = "3.13.17",
+    # AMD's signed FSR DLLs (MIT, see runtime/THIRD_PARTY_NOTICES.md), from the FidelityFX SDK repository at these tags
+    [string]$FsrSdkTag = "v2.4.0",
+    [string]$FsrLoaderSha256 = "38a56a01fb3565c0757d9f5c1e4e69de4b65e5f2e5769b323b200dc1f142bab9",
+    [string]$FsrUpscalerSha256 = "4a7e895af6e0b615d40a84d59eb8c2b1054ad91cdd0c739567940270d51bdab7",
+    [string]$FsrLicenseSha256 = "32357259b965d6a8001e9e508ba60eda6034027c5923a7d226ffbaff813c2bfb",
+    [string]$FfxFgTag = "v1.1.4",
+    [string]$FfxFgSha256 = "a1624cc4238fef046f30c4d80ce3f47be63fc5f5373f49e3ee9edb9960f54c78",
+    [string]$FfxFgLicenseSha256 = "82cf74fc23885107c7f69249ac3f1dac55898ff68320eb2c753984cae6b2d78a",
     [switch]$NoZip
 )
 $ErrorActionPreference = 'Stop'
@@ -122,6 +131,25 @@ if (-not (Test-Path $zx)) { [IO.Compression.ZipFile]::ExtractToDirectory($zipZig
 $ztop = Get-ChildItem $zx -Directory | Select-Object -First 1
 Mirror $ztop.FullName 'tools\build\zig' @('doc\*')
 Put (Join-Path $ztop.FullName 'LICENSE') 'licenses\LICENSE.zig.MIT.txt'
+
+# --- AMD FSR (upscalers\fsr): the FSR SDK v2.4.0 upscaler and its loader, the v1.1.4 DLL with the Vulkan frame-generation swapchain.
+# Straight from AMD's repository at the pinned tags; each file must match its sha256 and carry AMD's signature.
+$amd = "https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK"
+$fsr = @(
+    @{ url = "$amd/$FsrSdkTag/Kits/FidelityFX/signedbin/amd_fidelityfx_loader_vk.dll"; file = "fsr-$FsrSdkTag-amd_fidelityfx_loader_vk.dll"; sha = $FsrLoaderSha256; to = 'upscalers\fsr\amd_fidelityfx_loader_vk.dll' },
+    @{ url = "$amd/$FsrSdkTag/Kits/FidelityFX/signedbin/amd_fidelityfx_upscaler_vk.dll"; file = "fsr-$FsrSdkTag-amd_fidelityfx_upscaler_vk.dll"; sha = $FsrUpscalerSha256; to = 'upscalers\fsr\amd_fidelityfx_upscaler_vk.dll' },
+    @{ url = "$amd/$FfxFgTag/PrebuiltSignedDLL/amd_fidelityfx_vk.dll"; file = "ffx-$FfxFgTag-amd_fidelityfx_vk.dll"; sha = $FfxFgSha256; to = 'upscalers\fsr\amd_fidelityfx_vk.dll' },
+    @{ url = "$amd/$FsrSdkTag/Kits/FidelityFX/docs/license.md"; file = "fsr-$FsrSdkTag-license.md"; sha = $FsrLicenseSha256; to = 'licenses\LICENSE.AMD-FSR-SDK-v2.4.0.md' },
+    @{ url = "$amd/$FfxFgTag/LICENSE.txt"; file = "ffx-$FfxFgTag-LICENSE.txt"; sha = $FfxFgLicenseSha256; to = 'licenses\LICENSE.AMD-FidelityFX-SDK-v1.1.4.txt' }
+)
+foreach ($f in $fsr) {
+    $p = Fetch $f.url $f.file $f.sha
+    if ($p.EndsWith('.dll')) {
+        $sig = Get-AuthenticodeSignature $p
+        if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch 'Advanced Micro Devices') { throw "no valid AMD signature: $($f.url)" }
+    }
+    Put $p $f.to
+}
 
 # --- Python embeddable package + the lifter's and tools' packages
 $zipPy = Fetch "https://www.python.org/ftp/python/$PythonVersion/python-$PythonVersion-embed-amd64.zip" "python-$PythonVersion-embed-amd64.zip"

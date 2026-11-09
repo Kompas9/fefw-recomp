@@ -764,7 +764,7 @@ Mirror* mirror_for(PoolGpu* pg, MemoryPool* mp) {
     auto m = std::make_unique<Mirror>();
     // Without tracking of the CPU's writes there is no copy: a copy that misses a write serves old vertices and indices, and after an area
     // load those can point anywhere (an untracked experiment lost the Vulkan device at the first load).
-    m->ww = mem::ww::region_create(reinterpret_cast<uint64_t>(pg->base), pg->size);
+    m->ww = mem::ww::region_create(reinterpret_cast<uint64_t>(pg->base), pg->size, "pool mirror / lazy compute");
     if (!m->ww) {
         NXLOG_I(kTag, "pool %p (%llu KiB) gets no device-local copy: its writes cannot be tracked (not in the heap's primary view)",
                 static_cast<void*>(pg->base), static_cast<unsigned long long>(pg->size >> 10));

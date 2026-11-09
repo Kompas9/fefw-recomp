@@ -550,6 +550,12 @@ void set_cursor_visible(bool on) {
     else SDL_HideCursor();
 }
 
+void warp_mouse(float x, float y) {
+    if (!g_window) return;
+    const float d = pixel_density();
+    SDL_WarpMouseInWindow(g_window, d > 0 ? x / d : x, d > 0 ? y / d : y);
+}
+
 void set_text_input(bool on) {
     if (!g_window || SDL_TextInputActive(g_window) == on) return;
     if (!(on ? SDL_StartTextInput(g_window) : SDL_StopTextInput(g_window))) NXLOG_W(kTag, "set_text_input(%d) failed: %s", on ? 1 : 0, SDL_GetError());

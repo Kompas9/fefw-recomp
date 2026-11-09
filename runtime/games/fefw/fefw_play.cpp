@@ -15,6 +15,13 @@
 // nn::oe::GetProgramTotalActiveTime), with the target and the last step. 1.00x is the right speed. The clock is sampled every second
 // whatever the period: the F1 menu (fefw_menu.cpp) shows it through clock_info() and changes the period live (set_clock_log).
 //
+// Map cursor. game::map::Cursor::Impl::Tick (0x735020, the battle map and world map cursor) moves the cursor each frame by the stick (dead
+// zone 0.25) times 5 * 60 / target / a tuning value, twice that while Y is held (input flags bit 3): it counts the target frame rate, not the
+// time the frame took, so whenever the game runs below its target (fps60 or fps120 not reached, a heavy scene, a slow PC) the cursor slows down
+// with it while the game clock does not (#40). [fefw] cursor_real_time = 1 (default) puts the time manager's step of the frame (the same 60 /
+// target when the frame was on time, the measured time when it was late, the smooth step with fps120) in place of 60 / target at the two sites
+// (s0 after `fdiv s0, s1, s0` at 0x7358b4 and 0x735930), kept within 4 steps so a load does not throw the cursor across the map.
+//
 // Movies (media/movie_vdec.cpp, on when the host movie::VideoDecoder is). The player's setup (0x1906510) takes its frame path from the byte
 // at +0x1318 (`ldrb w21` at 0x190654c): 0 native images, the console's, which the host cannot fill; 1 frames in CPU buffers, which the host
 // decoder writes. The site at 0x1906550 makes w21 1. On that path the player sets its frame count (+0xff8) to 4 only after it made the
@@ -66,6 +73,8 @@ constexpr uint64_t kTmReal = 0x18;                 // s64: real time, ticks
 constexpr uint64_t kTmGame = 0x48;                 // s64: game time of step channel 0, ticks
 constexpr uint64_t kTmStep = 0x44;                 // f32: the last step, frames of 1/59.94 s
 constexpr uint64_t kStepChoice = 0x180ef44;        // inline in the step (0x180eea0), before its clamp: s0 measured, s1 the chosen step
+constexpr uint64_t kCursorStepX = 0x7358b8;        // inline in game::map::Cursor::Impl::Tick: s0 = 60 / target (x movement)
+constexpr uint64_t kCursorStepY = 0x735934;        // the same for the other axis
 constexpr uint64_t kMovieSelect = 0x1906550;       // inline: after `ldrb w21, [x19, x8]`, the player's frame path (+0x1318)
 constexpr uint64_t kMovieCount = 0x1906634;        // inline: after the frame buffer object's init, before its buffers are made (0x1906640)
 constexpr uint64_t kMovieStorage = 0xc10;          // s32 in the player: 1 = frames in CPU buffers
@@ -75,7 +84,9 @@ struct State {
     uint64_t base = 0x7100000000ull;
     bool fps60 = false;
     bool fps120 = false;
-    uint32_t hook = 0, movie_select = 0, movie_count = 0, step_hook = 0;
+    uint32_t hook = 0, movie_select = 0, movie_count = 0, step_hook = 0, cursor_x = 0, cursor_y = 0;
+    std::atomic<uint64_t> cursor_fixes{0};
+    std::atomic<uint64_t> cursor_ratio_milli{0};   // sum of used / game step, x1000, since the last clock log line
     bool smooth = false;
     FILE* step_csv = nullptr;      // [fefw] step_csv: per frame host ms, target, measured, the game's step, the step used (frames)
     uint64_t steps_logged = 0;
@@ -151,6 +162,23 @@ void hook_step_choice(::Ctx* c, uint64_t, void*) {
     }
 }
 
+// [fefw] cursor_real_time: the frame's step (time manager +0x44, frames of 1/59.94 s) for 60 / target, within (0, 4 * 60 / target].
+void hook_cursor_step(::Ctx* c, uint64_t, void*) {
+    State& s = st();
+    const float nominal = c->v[0].f[0];
+    uint64_t tm = 0;
+    float step = 0;
+    if (!(nominal > 0.0f) || !rd(s.base + kTimeManager, &tm) || !rd(tm + kTmStep, &step) || !(step > 0.0f)) return;
+    const float used = std::min(step, 4.0f * nominal);
+    c->v[0].f[0] = used;
+    s.cursor_ratio_milli.fetch_add(static_cast<uint64_t>(used / nominal * 1000.0f), std::memory_order_relaxed);
+    s.cursor_fixes.fetch_add(1, std::memory_order_relaxed);
+    static std::atomic<bool> logged{false};
+    if (!logged.exchange(true))
+        NXLOG_I(kTag, "map cursor: moves by the frame's real step (%.2f frames; the game's 60 / target is %.2f)", static_cast<double>(step),
+                static_cast<double>(nominal));
+}
+
 void hook_movie_select(::Ctx* c, uint64_t, void*) {
     c->x[21] = 1;
     if (st().movies.fetch_add(1, std::memory_order_relaxed) == 0) NXLOG_I(kTag, "movie player: frames in CPU buffers (host decoder)");
@@ -222,6 +250,11 @@ void clock_thread() {
             const double rate = static_cast<double>(game - game0) / static_cast<double>(real - real0);
             NXLOG_I(kTag, "game clock: %.3fx real time over %d s (target %d fps, display %d, last step %.2f frames)", rate, period_s,
                     target, display, static_cast<double>(step));
+            // the map cursor (cursor_real_time): how much faster it moved than the game's own 60 / target would have made it
+            const uint64_t n = s.cursor_fixes.exchange(0), sum = s.cursor_ratio_milli.exchange(0);
+            if (n > 1)
+                NXLOG_I(kTag, "map cursor: %llu moves (2 per frame), real step / the game's 60 / target %.2f on average", static_cast<unsigned long long>(n),
+                        static_cast<double>(sum) / static_cast<double>(n) / 1000.0);
         }
         real0 = real;
         game0 = game;
@@ -265,7 +298,13 @@ void play_install(uint64_t base, play::GameHost*, const play::Settings&) {
     s.fps60 = config_get_bool("fefw", "fps60", false);
     s.fps120 = config_get_bool("fefw", "fps120", false);
     if (s.fps60 || s.fps120) s.hook = hook_add_inline(base + kGameplayTargetStore, &hook_gameplay_target);
-    const bool smooth = s.smooth = config_get_bool("fefw", "smooth_step", s.fps120);
+    // The game only runs at its target when the frame limit lets that many frames through: the shipped [display] fps_limit = 60 held fps120 at
+    // 60 without a word in the log. The floor raises a numeric limit below the target (play mode logs it); "auto" and vsync keep the display's say
+    // and get a warning there.
+    if (s.fps120) set_frame_cap_floor(120);
+    else if (s.fps60) set_frame_cap_floor(60);
+    // smooth_step defaults on with fps60 and fps120 (issue 24: the game's own rule runs 0.2-1.5 % fast at 60 when frames are uneven)
+    const bool smooth = s.smooth = config_get_bool("fefw", "smooth_step", s.fps120 || s.fps60);
     const std::string step_csv = config_get_str("fefw", "step_csv", "");
     if (!step_csv.empty()) s.step_csv = std::fopen(step_csv.c_str(), "w");
     if (s.step_csv) {
@@ -277,6 +316,10 @@ void play_install(uint64_t base, play::GameHost*, const play::Settings&) {
                 static_cast<double>(q.QuadPart) * 1000.0 / static_cast<double>(f.QuadPart));
     }
     if (smooth || s.step_csv) s.step_hook = hook_add_inline(base + kStepChoice, &hook_step_choice);
+    if (config_get_bool("fefw", "cursor_real_time", true)) {
+        s.cursor_x = hook_add_inline(base + kCursorStepX, &hook_cursor_step);
+        s.cursor_y = hook_add_inline(base + kCursorStepY, &hook_cursor_step);
+    }
     if (media::movie_decoder_enabled()) {
         s.movie_select = hook_add_inline(base + kMovieSelect, &hook_movie_select);
         s.movie_count = hook_add_inline(base + kMovieCount, &hook_movie_count);
@@ -313,11 +356,12 @@ void set_clock_log(int period_s) {
 void play_remove() {
     State& s = st();
     wide_remove();
-    for (uint32_t* h : {&s.hook, &s.movie_select, &s.movie_count, &s.step_hook}) {
+    for (uint32_t* h : {&s.hook, &s.movie_select, &s.movie_count, &s.step_hook, &s.cursor_x, &s.cursor_y}) {
         if (*h) hook_remove(*h);
         *h = 0;
     }
     if (s.fps120) set_present_interval_hz(0);
+    set_frame_cap_floor(0);
     s.clock_run.store(false);
 }
 

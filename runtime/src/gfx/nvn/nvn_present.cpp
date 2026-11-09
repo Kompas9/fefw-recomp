@@ -19,6 +19,7 @@
 #include "nxrt/gauge.h"
 #include "nxrt/ftrace.h"
 #include "nxrt/log.h"
+#include "nxrt/platform.h"
 #include "nvn_gpu_internal.h"
 
 namespace nxrt::nvn::be::gpu {
@@ -94,19 +95,20 @@ struct FrameCsv {
 };
 FrameCsv g_csv;
 
-void frame_csv_line(int64_t n, uint64_t start_ns, uint64_t end_ns, uint64_t wait_ns, double game_fps) {
+void frame_csv_line(int64_t n, uint64_t start_ns, uint64_t end_ns, uint64_t wait_ns, double game_fps, uint64_t present_call_ns, uint64_t sleep_ns) {
     if (!g_csv.tried) {
         g_csv.tried = true;
         const std::string path = nxrt::config_get_str("nvn", "frame_csv", "");
         if (!path.empty() && (g_csv.f = std::fopen(path.c_str(), "w"))) {
-            std::fprintf(g_csv.f, "present,start_ms,end_ms,wait_ms,game_fps\n");
+            std::fprintf(g_csv.f, "present,start_ms,end_ms,wait_ms,game_fps,present_call_ms,reflex_sleep_ms\n");
             NXLOG_I("nvn", "frame csv %s: its time 0 is the time of this line", path.c_str());
         }
         g_csv.t0 = start_ns;
     }
     if (!g_csv.f) return;
-    std::fprintf(g_csv.f, "%lld,%.3f,%.3f,%.3f,%.2f\n", static_cast<long long>(n), static_cast<double>(start_ns - g_csv.t0) * 1e-6,
-                 static_cast<double>(end_ns - g_csv.t0) * 1e-6, static_cast<double>(wait_ns) * 1e-6, game_fps);
+    std::fprintf(g_csv.f, "%lld,%.3f,%.3f,%.3f,%.2f,%.3f,%.3f\n", static_cast<long long>(n), static_cast<double>(start_ns - g_csv.t0) * 1e-6,
+                 static_cast<double>(end_ns - g_csv.t0) * 1e-6, static_cast<double>(wait_ns) * 1e-6, game_fps,
+                 static_cast<double>(present_call_ns) * 1e-6, static_cast<double>(sleep_ns) * 1e-6);
     if ((n & 255) == 0) std::fflush(g_csv.f);
 }
 }  // namespace
@@ -130,6 +132,18 @@ void present_on_render_thread(Window* w, int index, bool again) {
     double frame_rate = 0;
     if (FrameLimiter* lim = limiter()) {
         frame_rate = game_rate(w);
+        if (extras::framegen_requested()) {   // with vsync, frame generation's two presents per frame must fit the display (framegen.h)
+            static float hz = 0;
+            static uint64_t hz_at = 0;
+            const uint64_t now = FrameLimiter::now_ns();
+            if (!hz_at || now - hz_at > 1000000000ull) {
+                // [dlss] frame_gen_test_refresh_hz: test aid, the refresh rate the pacing rule assumes (the display itself is unchanged)
+                static const double test_hz = nxrt::config_get_double("dlss", "frame_gen_test_refresh_hz", 0.0);
+                hz = test_hz > 0 ? static_cast<float>(test_hz) : platform::display_refresh_hz();
+                hz_at = now;
+            }
+            frame_rate = extras::framegen_pace(frame_rate, rend->present_mode() == gfx::PresentMode::Fifo, hz);
+        }
         lim->set_game_fps(frame_rate);
         // the pre-frame hook (present mode changes) always runs here; the wait runs here only when no frame boundary has paced this present (S18)
         { NXFT("present.hook"); lim->run_pre_frame_hook(); }
@@ -171,13 +185,13 @@ void present_on_render_thread(Window* w, int index, bool again) {
     const extras::HdrState hs = extras::hdr_state();
     const extras::PictureLive pic = extras::picture_live();
     extras::OutputPass* op = output_pass();
-    auto draw_picture = [&](VkImageView from, VkImageView to) {   // also frame generation's HUD-less colour (nvn_framegen.h)
+    auto draw_picture = [&](VkImageView from, VkExtent2D from_extent, const int32_t* from_crop, VkImageView to) {   // also frame generation's HUD-less colour (nvn_framegen.h)
         if (op && (hs.scene_hdr || hs.output != extras::OutputKind::Sdr8 || extras::upscale_mode() == extras::UpscaleMode::Fsr1 ||
                    extras::upscale_mode() == extras::UpscaleMode::Nis || pic.active)) {
             extras::OutputParams prm;
             prm.src = from;
-            prm.src_extent = VkExtent2D{e.width, e.height};
-            for (int i = 0; i < 4; ++i) prm.crop[i] = crop[i];
+            prm.src_extent = from_extent;
+            for (int i = 0; i < 4; ++i) prm.crop[i] = from_crop[i];
             prm.keep_aspect = keep_aspect();
             prm.flip_y = window_origin_mode() == NVN_WINDOW_ORIGIN_MODE_LOWER_LEFT;
             prm.src_linear = hs.scene_hdr;
@@ -194,20 +208,22 @@ void present_on_render_thread(Window* w, int index, bool again) {
             prm.pic[3] = pic.gamma;
             op->record(fi.cmd, to, rend->format(), fi.extent, prm);
         } else {
-            pp->record(fi.cmd, to, fi.extent, from, VkExtent2D{e.width, e.height}, crop, keep_aspect());
+            pp->record(fi.cmd, to, fi.extent, from, from_extent, from_crop, keep_aspect());
         }
     };
-    draw_picture(src, fi.view);
-    fg_hudless_present(w, t, f, fi.extent, rend->format(), again, draw_picture);
+    draw_picture(src, VkExtent2D{e.width, e.height}, crop, fi.view);
+    fg_hudless_present(w, t, f, fi.extent, rend->format(), again, crop, draw_picture);
     // the frame's own submissions go first: in the present's submission ([nvn] submit_batch = frame), or on their own before it
     static thread_local std::vector<VkCommandBuffer> cmds;
     gfx::Renderer::SubmitPrefix pre;
     const bool merged = take_batch_for_present(&cmds, &pre);
     extras::framegen_present_begin(fi.cmd, fi.extent, VkExtent2D{e.width, e.height}, crop, keep_aspect(), again);
+    const uint64_t call_start = FrameLimiter::now_ns();
     { NXFT("present.end"); nxrt::HitchTimer ht(nxrt::kHpRenderPresentEnd); rend->end_frame(merged ? &pre : nullptr); }
+    const uint64_t call_ns = FrameLimiter::now_ns() - call_start;
     extras::framegen_present_end();
     if (merged) present_batch_done(pre);
-    if (!again) frame_csv_line(static_cast<int64_t>(counters().presents.load()), frame_start, FrameLimiter::now_ns(), frame_wait, frame_rate);
+    if (!again) frame_csv_line(static_cast<int64_t>(counters().presents.load()), frame_start, FrameLimiter::now_ns(), frame_wait, frame_rate, call_ns, extras::framegen_take_sleep_ns());
 }
 
 }  // namespace nxrt::nvn::be::gpu

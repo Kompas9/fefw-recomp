@@ -57,7 +57,7 @@ function stepsHtml(s) {
         <div class="row">
           ${running
             ? `<button class="btn" id="setup-cancel">${icon('circle-x')}Pause</button>`
-            : `<button class="btn ${s.complete ? '' : 'primary'}" id="setup-run">${icon('hammer')}${label}</button>`}
+            : `<button class="btn ${s.complete ? '' : 'primary'}" id="setup-run" ${s.cpu_problem ? 'disabled' : ''}>${icon('hammer')}${label}</button>`}
           ${s.complete && !running ? `<button class="btn primary" id="to-play">${icon('play')}Go to Play</button>` : ''}
           <button class="btn quiet" id="open-log">${icon('file-text')}Open full log</button>
         </div>
@@ -141,6 +141,8 @@ export async function render(el, ctx) {
         <div class="row">
           <button class="btn ${ok && saved !== path ? 'primary' : ''}" id="use" ${ok && status.progress.state !== 'running' ? '' : 'disabled'}>${icon('circle-check')}Use these game files</button>
         </div>
+
+        ${status.cpu_problem ? `<div class="banner danger" id="cpu-problem">${icon('circle-x')}<div><strong>This processor cannot run the game.</strong> ${esc(status.cpu_problem)}</div></div>` : ''}
 
         ${status.package ? "" : toolsHtml(status.tools)}
         ${ok && saved === path ? stepsHtml(status) : ''}

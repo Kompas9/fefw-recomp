@@ -7,4 +7,7 @@ Tools bundled for the first-run build. None of them contains game code or data.
 - nxrecomp lifter (tools/build/recomp): GPL-3.0-or-later (tools/build/recomp/LICENSE).
 - spirv_harness (tools/spirv_harness): built on Ryujinx's shader translator (MIT, LICENSE.Ryujinx.MIT.txt) and the .NET runtime (MIT).
 - DejaVu Sans (fonts/): Bitstream Vera / DejaVu licence.
-No NVIDIA or AMD binaries are included. FSR 3 DLLs can be added by the player (Settings).
+- AMD FSR (upscalers/fsr): amd_fidelityfx_loader_vk.dll and amd_fidelityfx_upscaler_vk.dll from the FSR SDK v2.4.0 (signedbin) and
+  amd_fidelityfx_vk.dll from the FidelityFX SDK v1.1.4 (PrebuiltSignedDLL), signed by AMD, unmodified. MIT
+  (LICENSE.AMD-FSR-SDK-v2.4.0.md lists the signedbin DLLs under MIT; LICENSE.AMD-FidelityFX-SDK-v1.1.4.txt).
+No NVIDIA binaries are included. DLSS needs the player's own copy of NVIDIA's Streamline files (README).

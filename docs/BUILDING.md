@@ -85,6 +85,12 @@ or one `NX_TOOLCHAIN` folder for the runtime (see `runtime\scripts\env.cmd`), an
 
 Runtime tests: `pwsh -File runtime\scripts\build.ps1 -Test`.
 
+FSR 3 in a source build: put AMD's DLLs in `upscalers\fsr` next to `fefw.exe` or in the run folder (or name the folder in
+`[upscale] fsr_dll`): `amd_fidelityfx_upscaler_vk.dll` and `amd_fidelityfx_loader_vk.dll` from `Kits/FidelityFX/signedbin` of the
+[FSR SDK](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK) tag v2.4.0 for upscaling, and `amd_fidelityfx_vk.dll` from
+`PrebuiltSignedDLL` of tag v1.1.4 for frame generation. `game-build\scripts\make-release.ps1` downloads the same files (sha256 and AMD
+signature checked) into the release package; they are never committed.
+
 ## Repository layout
 
 | Folder | What |

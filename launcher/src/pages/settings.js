@@ -20,10 +20,12 @@ const SECTIONS = [
         options: [['0', "Game's own (50%)"], ['0.5', '50%'], ['0.67', '67%'], ['0.75', '75%'], ['1.0', '100% (native, sharpest)']],
         hint: '3D render size per side, as a share of the output. The upscaler fills in the rest.' },
       { id: 'upscaler', type: 'select', label: 'Upscaler', sec: 'dlss', key: 'upscaler', def: 'taau',
-        options: [['taau', 'Built-in temporal (TAAU)'], ['dlss', 'NVIDIA DLSS (RTX; needs the Streamline files)'], ['fsr3', 'AMD FSR 3.1 (needs its DLLs)'], ['bilinear', 'Bilinear (no history)'], ['auto', 'Automatic (DLSS, else FSR 3, else TAAU)']],
-        hint: "Stands in for the console's DLSS. TAAU needs no extra files. DLSS and FSR 3 need their DLLs, and a change applies at the next start." },
-      { id: 'dlss_dll', type: 'path', label: 'DLSS (Streamline) folder', sec: 'upscale', key: 'dlss_dll', def: '', placeholder: 'upscalers/streamline next to the launcher',
-        hint: 'NVIDIA files, not included: sl.interposer.dll, sl.common.dll, sl.dlss.dll and nvngx_dlss.dll from the Streamline SDK. Leave empty for upscalers/streamline next to the launcher.' },
+        options: [['taau', 'Built-in temporal (TAAU)'], ['fsr3', 'AMD FSR 3 upscaling (any GPU; files included)'], ['dlss', 'NVIDIA DLSS (RTX; needs the Streamline files)'], ['bilinear', 'Bilinear (no history)'], ['auto', 'Automatic (DLSS, else FSR 3, else TAAU)']],
+        hint: "Stands in for the console's DLSS. TAAU needs no extra files. FSR 3 uses AMD's files in upscalers/fsr (they come with the release); DLSS needs NVIDIA's. If a file is missing the game says which in fefw.log and uses TAAU. Applies at the next start." },
+      { id: 'fsr_dll', type: 'path', label: 'FSR 3 (AMD) folder', sec: 'upscale', key: 'fsr_dll', def: '', placeholder: 'upscalers/fsr next to the launcher', status: 'fsr',
+        hint: 'Leave empty to use the files that come with the release. Upscaling: amd_fidelityfx_upscaler_vk.dll and amd_fidelityfx_loader_vk.dll (FSR SDK v2.4.0, signedbin). Frame generation: amd_fidelityfx_vk.dll (FidelityFX SDK v1.1.4).' },
+      { id: 'dlss_dll', type: 'path', label: 'DLSS (Streamline) folder', sec: 'upscale', key: 'dlss_dll', def: '', placeholder: 'upscalers/streamline next to the launcher', status: 'dlss',
+        hint: 'NVIDIA files, not included: sl.interposer.dll, sl.common.dll, sl.dlss.dll and nvngx_dlss.dll from the Streamline SDK (bin/x64); DLSS frame generation also needs sl.dlss_g.dll, sl.reflex.dll, sl.pcl.dll, nvngx_dlssg.dll and NvLowLatencyVk.dll. Leave empty for upscalers/streamline next to the launcher.' },
       { id: 'quality', type: 'select', label: 'Quality', sec: 'fefw', key: 'quality', def: 'console',
         options: [['console', 'As the console picks'], ['docked', 'Always docked quality']] },
       { id: 'shadow_size', type: 'select', label: 'Shadow map size', sec: 'fefw', key: 'shadow_size', def: '0',
@@ -50,11 +52,11 @@ const SECTIONS = [
     title: 'Frame rate', icon: 'gauge', file: 'game',
     fields: [
       { id: 'fps60', type: 'toggle', label: '60 fps gameplay', sec: 'fefw', key: 'fps60', def: '0', hint: 'The game runs at 30 on the console. Dialogue text also types twice as fast.' },
-      { id: 'fps120', type: 'toggle', label: '120 fps gameplay', sec: 'fefw', key: 'fps120', def: '0', hint: 'Wins over 60 fps. Needs a fast CPU.' },
-      { id: 'smooth_step', type: 'toggle', label: 'Exact game clock', sec: 'fefw', key: 'smooth_step', def: '0', hint: 'Keeps game time exact when frame times vary. On by default with 120 fps.' },
+      { id: 'fps120', type: 'toggle', label: '120 fps gameplay', sec: 'fefw', key: 'fps120', def: '0', hint: 'Wins over 60 fps. Needs a fast CPU. A frame rate limit below 120 is raised to 120 while this is on; a 60 Hz display, or vsync on a 60 Hz display, still shows 60.' },
+      { id: 'smooth_step', type: 'toggle', label: 'Exact game clock', sec: 'fefw', key: 'smooth_step', def: '0', hint: 'Keeps game time exact when frame times vary. Unset, it is on with 60 and 120 fps gameplay and off at the original 30.' },
       { id: 'frame_gen', type: 'select', label: 'Frame generation', sec: 'dlss', key: 'frame_gen', def: '0',
-        options: [['0', 'Off'], ['fsr3', 'AMD FSR 3 (needs amd_fidelityfx_vk.dll)']], hint: 'Keep vsync off with frame generation.' },
-      { id: 'frame_gen_dll', type: 'text', label: 'FSR 3 frame generation DLL', sec: 'dlss', key: 'frame_gen_dll', def: '', placeholder: 'path to amd_fidelityfx_vk.dll (FidelityFX SDK v1.1.4)' },
+        options: [['0', 'Off'], ['fsr3', 'AMD FSR 3 frame generation (any GPU; files included)'], ['dlss', 'NVIDIA DLSS frame generation (RTX 40 or newer; Streamline files)']],
+        hint: 'One generated frame between real ones; the HUD and text come from the real frame. Best with VSync off on a 120 Hz or faster display. With VSync on the game renders at most half the refresh rate, and below twice the game frame rate generation pauses. FSR 3 uses amd_fidelityfx_vk.dll from the FSR 3 folder (Picture). DLSS needs Windows hardware-accelerated GPU scheduling and the Streamline frame generation files. Applies at the next start.' },
     ],
   },
   {
@@ -64,9 +66,8 @@ const SECTIONS = [
         options: [['windowed', 'Windowed'], ['borderless', 'Borderless fullscreen'], ['exclusive', 'Exclusive fullscreen']], hint: 'Alt+Enter switches while playing.' },
       { id: 'size', type: 'size', label: 'Window size', sec: 'display', keys: ['width', 'height'], def: ['1280', '720'] },
       { id: 'fps_limit', type: 'autonum', label: 'Frame rate limit', sec: 'display', key: 'fps_limit', def: 'auto',
-        min: 0, max: 1000, numDefault: 60, unit: 'fps', autoLabel: 'Auto', hint: 'Auto follows the display refresh rate. 0 is unlimited.' },
+        min: 0, max: 1000, numDefault: 60, unit: 'fps', autoLabel: 'Auto', hint: 'Auto follows the display refresh rate. 0 is unlimited. 60 and 120 fps gameplay raise a lower number to their own rate while they are on.' },
       { id: 'vsync', type: 'toggle', label: 'VSync', sec: 'display', key: 'vsync', def: '1' },
-      { id: 'fsr_dll', type: 'text', label: 'FSR 3.1 upscaler DLL folder', sec: 'upscale', key: 'fsr_dll', def: '', placeholder: 'folder with amd_fidelityfx_upscaler_vk.dll' },
     ],
   },
   {
@@ -82,7 +83,8 @@ const SECTIONS = [
   {
     title: 'Input, saves and log', icon: 'folder', file: 'game',
     fields: [
-      { id: 'jc2_mouse', type: 'select', label: 'Joy-Con 2 mouse from the PC mouse', sec: 'input', key: 'jc2_mouse', def: 'off', options: [['auto', 'Automatic'], ['on', 'On'], ['off', 'Off']] },
+      { id: 'jc2_mouse', type: 'select', label: 'Mouse controls (the game's Joy-Con 2 mouse)', sec: 'input', key: 'jc2_mouse', def: 'auto', options: [['auto', 'Automatic (last device used)'], ['on', 'Always the mouse'], ['off', 'Off']],
+        hint: 'Moving or clicking the mouse switches the game to its mouse controls; a key or the controller switches back. Speeds: the game's own Settings.' },
       { id: 'save_dir', type: 'path', label: 'Save folder', sec: 'fs', key: 'save_dir', def: '', placeholder: 'save/ in the run folder' },
       { id: 'log_level', type: 'select', label: 'Log detail', sec: 'log', key: 'level', def: 'info', options: [['error', 'Errors'], ['warn', 'Warnings'], ['info', 'Normal'], ['debug', 'Debug']] },
     ],
@@ -165,7 +167,7 @@ export async function render(el, ctx) {
 
   const fieldHtml = (f) => `
     <div class="field">
-      <label class="name">${esc(f.label)}${f.hint ? `<span class="hint">${esc(f.hint)}</span>` : ''}</label>
+      <label class="name">${esc(f.label)}${f.hint ? `<span class="hint">${esc(f.hint)}</span>` : ''}${f.status ? `<span class="hint" data-status="${f.status}">Checking the files...</span>` : ''}</label>
       <div class="control">${CONTROL[f.type](f, model[f.id])}</div>
     </div>`;
 
@@ -190,7 +192,21 @@ export async function render(el, ctx) {
       </div>`;
     refreshIcons();
     bind();
+    checkFiles();
   }
+
+  // The upscaler files the game will find with the folders as typed (found only when every file a feature needs is in one folder).
+  let checkSeq = 0;
+  async function checkFiles() {
+    const seq = ++checkSeq;
+    const r = await api('upscaler_files', { fsrDir: fwd(model.fsr_dll || ''), dlssDir: fwd(model.dlss_dll || '') }).catch(() => null);
+    if (seq !== checkSeq || !r) return;
+    const line = (name, x) => `${name}: ${x.found ? `found (${x.detail})` : `not found, ${x.detail}`}`;
+    const put = (which, text) => el.querySelectorAll(`[data-status="${which}"]`).forEach((n) => { n.textContent = text; });
+    put('fsr', `${line('Upscaling', r.fsr_upscaling)}. ${line('Frame generation', r.fsr_framegen)}.`);
+    put('dlss', `${line('DLSS', r.dlss)}. ${line('DLSS frame generation', r.dlss_framegen)}.`);
+  }
+  let checkTimer = 0;
 
   function bind() {
     const byId = Object.fromEntries(all.map((f) => [f.id, f]));
@@ -206,6 +222,10 @@ export async function render(el, ctx) {
           updateBar();
         } else if (input.type === 'text' || input.type === 'number') {
           updateBar();
+          if (f.status) {
+            clearTimeout(checkTimer);
+            checkTimer = setTimeout(checkFiles, 300);
+          }
         } else {
           draw(); // toggles and selects change dependent markup (labels, disabled inputs)
         }

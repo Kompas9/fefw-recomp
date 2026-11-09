@@ -71,6 +71,7 @@ TemporalBackend* temporal_dlss(void* gfx_device, bool dlaa);
 // True when the backend's DLLs can be found (for the F1 page; does not load anything).
 bool temporal_ffx_available();
 bool temporal_dlss_available();
+bool streamline_framegen_files();   // the DLSS files and the five DLSS Frame Generation adds are all in the Streamline folder
 bool temporal_dlss_started();   // Streamline was initialised before the Vulkan instance (needed for DLSS; set by streamline_preinit)
 
 // Streamline must own vkCreateInstance / vkCreateDevice / the swapchain calls: when the start-up mode is DLSS or DLAA, this loads

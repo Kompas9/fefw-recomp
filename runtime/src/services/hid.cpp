@@ -101,6 +101,10 @@ struct Jc2Feed {
     nxrt::hid::HostMouse m;
     uint64_t last_ns = 0;
     float wheel_x = 0, wheel_y = 0;     // notches not yet sampled
+    float dx = 0, dy = 0;               // motion not yet sampled (pointer-range units)
+    float wake = 0;                     // raw counts not yet sampled (the wake test)
+    uint32_t presses = 0;               // buttons pressed and not yet sampled
+    uint64_t other_seq = 0;             // jc2_mouse_other_input calls
 };
 Jc2Feed& feed() {
     static Jc2Feed* f = new Jc2Feed();
@@ -110,16 +114,20 @@ std::atomic<int> g_jc2_mode{-1};          // -1: not read from the config yet
 std::atomic<bool> g_jc2_request{false};
 std::atomic<bool> g_jc2_listed{false};    // the game set up Nmouse and the device is in its handle table
 std::atomic<bool> g_jc2_active{false};    // last sampled "on its surface"
+std::atomic<float> g_jc2_wake{8.0f};      // [mouse] jc2_wake: raw counts within kWakeWindowNs that put the mouse on its surface
+std::atomic<uint64_t> g_jc2_engages{0}, g_jc2_lifts{0}, g_jc2_recentres{0};
+std::atomic<int32_t> g_jc2_x{0}, g_jc2_y{0};
+constexpr uint64_t kWakeWindowNs = 250000000ull;
 
 uint64_t now_ns() {
     return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
 }
 
-// The feed is live when play mode sent one in the last 250 ms with the window focused and the mouse free.
+// The feed is live when play mode sent one in the last 250 ms with the window focused.
 bool jc2_feed_live() {
     Jc2Feed& f = feed();
     std::lock_guard<std::mutex> lk(f.mu);
-    return f.last_ns && now_ns() - f.last_ns < 250000000ull && f.m.focused && !f.m.captured;
+    return f.last_ns && now_ns() - f.last_ns < 250000000ull && f.m.focused;
 }
 
 struct HidState {
@@ -146,8 +154,11 @@ struct HidState {
     uint32_t nm_merged_types = 0;
     uint64_t nm_btn_left = 0, nm_btn_right = 0;   // NmouseButtonConfigJoy{Left,Right}Jcms (8 bytes each), stored only
     int32_t nm_x = -1, nm_y = -1;           // last sampled pointer (-1: none yet)
-    float nm_u = -1, nm_v = -1;             // last fed pointer, to see the mouse move
-    bool nm_in_use = false;                 // the mouse is "on its surface": set by mouse use, cleared by pad buttons (sample_nmouse)
+    float nm_px = 960, nm_py = 540;         // the virtual pointer (pointer range): moved by the mouse, placed by SetNmousePointerPosition
+    bool nm_in_use = false;                 // the mouse is "on its surface": set by real mouse use, cleared by any other input (sample_nmouse)
+    float nm_wake = 0;                      // raw counts moved since nm_wake_ns (the wake test)
+    uint64_t nm_wake_ns = 0;
+    uint64_t nm_other_seen = 0;             // the Jc2Feed::other_seq already acted on
     uint32_t nm_logged = 0, jcms_starts = 0, active_logs = 0;
     bool vib214_logged = false;
     std::atomic<int> resources{0};          // live IAppletResource objects
@@ -465,6 +476,8 @@ void nm_setup(HidState& s) {
     std::memset(b, 0, kNmMinSize);
     for (uint32_t i = 0; i < kNmSlots; ++i) ring_init<NmouseInternal>(b, kNmRings + i * kNmRingSize);
     s.nm_x = s.nm_y = -1;
+    s.nm_px = static_cast<float>(s.nm_w / 2);
+    s.nm_py = static_cast<float>(s.nm_h / 2);
     if (nxrt::hid::jc2_mouse_mode() != nxrt::hid::Jc2MouseMode::Off) nm_list_devices(s);
 }
 
@@ -474,71 +487,90 @@ void jcms_setup(HidState& s) {
     for (uint32_t i = 0; i < 16; ++i) ring_init<JcmsState>(b, i * kJcmsRingSize);
 }
 
-// A pad input that puts a real Joy-Con 2 mouse down: A/B/X/Y or the right stick. The left stick moves the character in mouse mode,
-// so it does not count (the game's guide: only lifting the Joy-Con returns to buttons).
-bool pad_takes_over(const InputSnapshot& snap) {
-    using namespace nxrt::hid;
-    constexpr uint64_t kFace = btn(kBtnA) | btn(kBtnB) | btn(kBtnX) | btn(kBtnY);
-    constexpr int32_t kStick = 32767 * 4 / 10;
-    for (const NpadInput& p : snap.npad) {
-        if (!p.connected) continue;
-        if ((p.buttons & kFace) || std::abs(p.right.x) > kStick || std::abs(p.right.y) > kStick) return true;
-    }
-    return false;
-}
-
-// One Nmouse sample from the play layer's feed: the pointer in the pointer range, the range itself, the buttons, the wheel (120 per notch, inferred from the game clamping its sum at +-600), and "on its surface" while jc2_mouse_active().
-// "On its surface" also needs the mouse in use: moving, clicking or scrolling sets it, and a pad's A/B/X/Y or right stick clears it,
-// as lifting the Joy-Con does. The game only leaves mouse controls after that bit stays clear (main 0x19c7024), so without this a
-// mouse nudged once kept the game in mouse mode for good. Caller holds st().mu.
-void sample_nmouse(HidState& s, const InputSnapshot& snap) {
+// One Nmouse sample from the play layer's feed, as a real Joy-Con 2 (R) mouse would send it.
+// - Pointer: the virtual pointer moves by the motion fed since the last sample (pointer-range units, kept within the range) and the game
+//   places it with SetNmousePointerPosition. Fortune's Weave puts it back at the centre every frame and reads x - 960, y - 540 as that
+//   frame's movement (main 0x19c70a0), so where the PC pointer is on the window does not matter, only how it moves.
+// - "On its surface" (attribute bit 1): lifted while the window has no focus (or the F1 menu is up); kept as it is while the feed is
+//   late (a load or a stall is no reason to change hands). Auto mode sets it when the mouse really moves (jc2_wake raw counts within
+//   0.25 s), clicks or scrolls, and clears it at once on any key or pad input (Jc2Feed::other_seq): the last device used wins and a
+//   still or jittery mouse never takes over. The game leaves its mouse controls after its own timer (main 0x19c7024; Fortune's Weave's
+//   module cuts it short, fefw_mouse.cpp). On mode keeps the bit set while the window has focus. Motion while the mouse is lifted only
+//   counts toward the wake test.
+// Caller holds st().mu.
+void sample_nmouse(HidState& s, const InputSnapshot&) {
     if (!s.nm_addr || !g_jc2_listed.load()) return;
-    const bool live = nxrt::hid::jc2_mouse_active();
+    const bool mode_off = nxrt::hid::jc2_mouse_mode() == nxrt::hid::Jc2MouseMode::Off;
+    const bool on_mode = nxrt::hid::jc2_mouse_mode() == nxrt::hid::Jc2MouseMode::On;
+    float dx = 0, dy = 0, wake = 0, wx = 0, wy = 0;
+    uint32_t buttons = 0, presses = 0;
+    uint64_t other = 0;
+    bool focused = false, fresh = false;
     {
         Jc2Feed& f = feed();
         std::lock_guard<std::mutex> lk(f.mu);
-        const bool moved = s.nm_u >= 0 && (f.m.u != s.nm_u || f.m.v != s.nm_v);
-        if (live && (moved || f.m.buttons || f.wheel_x != 0 || f.wheel_y != 0)) s.nm_in_use = true;
-        s.nm_u = f.m.u;
-        s.nm_v = f.m.v;
-    }
-    if (s.nm_in_use && pad_takes_over(snap)) s.nm_in_use = false;
-    const bool active = live && s.nm_in_use;
-    NmouseInternal ns{};
-    const int32_t prev_x = s.nm_x, prev_y = s.nm_y;
-    float wx = 0, wy = 0;
-    float u = 0, v = 0;
-    uint32_t buttons = 0;
-    {
-        Jc2Feed& f = feed();
-        std::lock_guard<std::mutex> lk(f.mu);
-        u = std::clamp(f.m.u, 0.f, 1.f);
-        v = std::clamp(f.m.v, 0.f, 1.f);
-        buttons = f.m.buttons;
+        focused = f.last_ns != 0 && f.m.focused;
+        fresh = f.last_ns != 0 && now_ns() - f.last_ns < 250000000ull;
+        dx = f.dx;
+        dy = f.dy;
+        wake = f.wake;
         wx = f.wheel_x;
         wy = f.wheel_y;
-        if (active) f.wheel_x = f.wheel_y = 0;
+        presses = f.presses;
+        buttons = f.m.buttons;
+        other = f.other_seq;
+        f.dx = f.dy = f.wake = f.wheel_x = f.wheel_y = 0;
+        f.presses = 0;
     }
+    const uint64_t t = now_ns();
+    const bool other_used = other != s.nm_other_seen;
+    s.nm_other_seen = other;
+    bool in_use = s.nm_in_use;
+    if (mode_off || !focused) {
+        in_use = false;          // off, or the window lost focus (or a runtime menu is up)
+        s.nm_wake = 0;
+    } else if (!fresh) {
+        // no feed for a while (the game is loading or stalled): nothing changes hands
+    } else if (on_mode) {
+        in_use = true;
+    } else if (other_used) {
+        in_use = false;          // a key or a pad: the mouse is lifted at once
+        s.nm_wake = 0;
+    } else if (!in_use) {
+        if (wake > 0) {
+            if (t - s.nm_wake_ns > kWakeWindowNs) s.nm_wake = 0;
+            s.nm_wake += wake;
+            s.nm_wake_ns = t;
+        }
+        if (presses || wx != 0 || wy != 0 || s.nm_wake >= g_jc2_wake.load(std::memory_order_relaxed)) {
+            in_use = true;
+            s.nm_wake = 0;
+        }
+    }
+    if (in_use != s.nm_in_use) (in_use ? g_jc2_engages : g_jc2_lifts).fetch_add(1, std::memory_order_relaxed);
+    s.nm_in_use = in_use;
+    const bool active = in_use;
+    NmouseInternal ns{};
+    const int32_t prev_x = s.nm_x, prev_y = s.nm_y;
     if (active) {
-        const int32_t x = std::min(s.nm_w - 1, static_cast<int32_t>(u * static_cast<float>(s.nm_w)));
-        const int32_t y = std::min(s.nm_h - 1, static_cast<int32_t>(v * static_cast<float>(s.nm_h)));
-        ns.x = x;
-        ns.y = y;
-        s.nm_x = x;
-        s.nm_y = y;
+        s.nm_px = std::clamp(s.nm_px + dx, 0.f, static_cast<float>(s.nm_w - 1));
+        s.nm_py = std::clamp(s.nm_py + dy, 0.f, static_cast<float>(s.nm_h - 1));
         ns.wheel_x = static_cast<int32_t>(std::lround(wx * 120.f));
         ns.wheel_y = static_cast<int32_t>(std::lround(wy * 120.f));
         ns.buttons = buttons;
         ns.attributes = kNmAttrConnected;
-    } else {
-        ns.x = std::max(0, s.nm_x);
-        ns.y = std::max(0, s.nm_y);
     }
+    // the pointer keeps its fraction here; the state carries whole units
+    ns.x = s.nm_x = static_cast<int32_t>(std::lround(s.nm_px));
+    ns.y = s.nm_y = static_cast<int32_t>(std::lround(s.nm_py));
+    g_jc2_x.store(ns.x, std::memory_order_relaxed);
+    g_jc2_y.store(ns.y, std::memory_order_relaxed);
     ns.range_w = s.nm_w;
     ns.range_h = s.nm_h;
     if (active != g_jc2_active.exchange(active) && s.active_logs < 200) {
         s.active_logs++;
-        NXLOG_I("hid", "Joy-Con 2 mouse %s (mode %s)", active ? "ON: the game sees the PC mouse" : "off", nxrt::hid::jc2_mouse_mode_name(nxrt::hid::jc2_mouse_mode()));
+        NXLOG_I("hid", "Joy-Con 2 mouse %s (mode %s)", active ? "on its surface: the game sees the PC mouse" : "lifted",
+                nxrt::hid::jc2_mouse_mode_name(nxrt::hid::jc2_mouse_mode()));
     }
     uint8_t* b = reinterpret_cast<uint8_t*>(s.nm_addr);
     for (uint32_t i = 0; i < 2; ++i) ring_push(ring_at<NmouseInternal>(b, kNmRings + i * kNmRingSize), ns);
@@ -1141,14 +1173,19 @@ void setup_hid(ipc::Service& svc) {
     });
     // InitializeNmouse (sdk 0x75006569e0, the form Pokopia uses: 0xC000 bytes, 1920x1080).
     svc.add_cmd(3139, "InitializeNmouse", [](ipc::Request& req, ipc::Response&) -> uint32_t { return nm_initialize(req, "InitializeNmouse"); });
-    // SetNmousePointerPosition (sdk 0x7500657410): s32 x @0, s32 y @4, aruid @8, NmouseHandle @0x10. The pointer is the PC mouse, which
-    // the game cannot move: accepted and logged (Info for the first calls: Fortune's Weave centres the pointer every frame).
+    // SetNmousePointerPosition (sdk 0x7500657410): s32 x @0, s32 y @4, aruid @8, NmouseHandle @0x10. Places the virtual pointer, which
+    // the PC mouse then moves (sample_nmouse). Fortune's Weave puts it at the centre every frame after reading the state and takes the
+    // offset from the centre as the frame's movement.
     svc.add_cmd(3140, "SetNmousePointerPosition", [](ipc::Request& req, ipc::Response&) -> uint32_t {
-        static std::atomic<uint32_t> calls{0};
-        const LogLevel level = calls.fetch_add(1, std::memory_order_relaxed) < 3 ? LogLevel::Info : LogLevel::Debug;
+        const int32_t x = req.arg<int32_t>(0), y = req.arg<int32_t>(4);
+        const uint64_t n = g_jc2_recentres.fetch_add(1, std::memory_order_relaxed);
+        const LogLevel level = n < 3 ? LogLevel::Info : LogLevel::Debug;
         if (log_enabled(level))
-            logf(level, "hid", "SetNmousePointerPosition(%d, %d, handle %llx): the pointer is the PC mouse, not moved", req.arg<int32_t>(0),
-                 req.arg<int32_t>(4), static_cast<unsigned long long>(req.arg<uint64_t>(0x10)));
+            logf(level, "hid", "SetNmousePointerPosition(%d, %d, handle %llx)", x, y, static_cast<unsigned long long>(req.arg<uint64_t>(0x10)));
+        std::lock_guard<std::mutex> lk(st().mu);
+        HidState& s = st();
+        s.nm_px = static_cast<float>(std::clamp(x, 0, s.nm_w - 1));
+        s.nm_py = static_cast<float>(std::clamp(y, 0, s.nm_h - 1));
         return 0;
     });
     // EnableNmousePointer (sdk 0x75006572b0): bool @0, aruid @8, NmouseHandle @0x10. Stored in that handle's info byte, which the client
@@ -1204,9 +1241,12 @@ void hid_reset() {
     s.nm_merged_types = 0;
     s.nm_btn_left = s.nm_btn_right = 0;
     s.nm_x = s.nm_y = -1;
+    s.nm_px = 960;
+    s.nm_py = 540;
     s.nm_logged = s.jcms_starts = s.active_logs = 0;
-    s.nm_u = s.nm_v = -1;
     s.nm_in_use = false;
+    s.nm_wake = 0;
+    s.nm_wake_ns = 0;
     s.vib214_logged = false;
     g_jc2_listed.store(false);
     g_jc2_active.store(false);
@@ -1245,6 +1285,20 @@ void hid_set_background_sampling(bool enabled) {
 // ---- Joy-Con 2 mouse: the play layer's side (include/nxrt/jc2_mouse.h) -------------------------------------------------------------------
 namespace nxrt::hid {
 
+namespace {
+struct PointerHandover {
+    std::mutex mu;
+    float host_u = 0, host_v = 0;
+    bool host = false;
+    float ret_u = 0, ret_v = 0;
+    bool ret = false;
+};
+PointerHandover& handover() {
+    static PointerHandover* h = new PointerHandover();
+    return *h;
+}
+}  // namespace
+
 Jc2MouseMode jc2_mouse_mode() {
     int m = services::g_jc2_mode.load();
     if (m < 0) {
@@ -1272,7 +1326,72 @@ void jc2_mouse_feed(const HostMouse& m) {
     f.m = m;
     f.wheel_x += m.wheel_x;
     f.wheel_y += m.wheel_y;
+    f.dx += m.dx;
+    f.dy += m.dy;
+    f.wake += m.wake;
+    f.presses |= m.presses;
     f.last_ns = services::now_ns();
+    if (m.pointer) {
+        PointerHandover& h = handover();
+        std::lock_guard<std::mutex> lk2(h.mu);
+        h.host_u = m.u;
+        h.host_v = m.v;
+        h.host = true;
+    }
+}
+
+
+bool jc2_mouse_host_pointer(float* u, float* v) {
+    PointerHandover& h = handover();
+    std::lock_guard<std::mutex> lk(h.mu);
+    if (h.host) {
+        *u = h.host_u;
+        *v = h.host_v;
+    }
+    return h.host;
+}
+
+void jc2_mouse_set_return_point(float u, float v) {
+    PointerHandover& h = handover();
+    std::lock_guard<std::mutex> lk(h.mu);
+    h.ret_u = u;
+    h.ret_v = v;
+    h.ret = true;
+}
+
+bool jc2_mouse_take_return_point(float* u, float* v) {
+    PointerHandover& h = handover();
+    std::lock_guard<std::mutex> lk(h.mu);
+    if (!h.ret) return false;
+    *u = h.ret_u;
+    *v = h.ret_v;
+    h.ret = false;
+    return true;
+}
+
+void jc2_mouse_other_input() {
+    services::Jc2Feed& f = services::feed();
+    std::lock_guard<std::mutex> lk(f.mu);
+    f.other_seq++;
+    f.dx = f.dy = f.wake = 0;      // motion that came with it (a hand brushing the mouse) does not wake it again
+}
+
+void jc2_mouse_set_wake(float counts) {
+    services::g_jc2_wake.store(std::max(0.f, counts), std::memory_order_relaxed);
+}
+
+bool jc2_mouse_engaged() {
+    return services::g_jc2_active.load(std::memory_order_relaxed);
+}
+
+Jc2Stats jc2_mouse_stats() {
+    Jc2Stats r;
+    r.engages = services::g_jc2_engages.load(std::memory_order_relaxed);
+    r.lifts = services::g_jc2_lifts.load(std::memory_order_relaxed);
+    r.recentres = services::g_jc2_recentres.load(std::memory_order_relaxed);
+    r.x = services::g_jc2_x.load(std::memory_order_relaxed);
+    r.y = services::g_jc2_y.load(std::memory_order_relaxed);
+    return r;
 }
 
 void jc2_mouse_request(bool want) {

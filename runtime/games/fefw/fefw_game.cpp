@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "play_display.h"
 #include "play_game.h"
 #include "play_types.h"
 
@@ -93,13 +94,27 @@ constexpr uint64_t kPresentWrapper = 0x5d170;
 // play mode's install / remove / frame: the game hooks (fefw_play.cpp) and the button glyphs (fefw_prompts.cpp)
 void install_all(uint64_t base, play::GameHost* host, const play::Settings& s) {
     play_install(base, host, s);
+    mouse_install(base);
     prompts_install(host);
 }
 void remove_all() {
     prompts_remove();
     play_remove();
 }
-void frame_all(bool, double, play::GameFrame*) { prompts_frame(); }
+void frame_all(bool, double, play::GameFrame*) {
+    prompts_frame();
+    mouse_frame();
+}
+
+// The picture's shape for play mode's pointer geometry (window <-> picture, the Joy-Con 2 mouse's pointer hand-over): the output when it
+// is wider than 16:9 (fefw_wide.cpp), else 16:9 (narrower outputs are fitted to 16:9, fefw_res.cpp).
+play::DisplayLive display_live() {
+    play::DisplayLive d;
+    const WideInfo wi = wide_info();
+    d.render_w = wi.active && wi.out_w > 0 ? wi.out_w : 1920;
+    d.render_h = wi.active && wi.out_h > 0 ? wi.out_h : 1080;
+    return d;
+}
 
 const play::GamePlay& game_play() {
     static const play::GamePlay t = [] {
@@ -108,7 +123,8 @@ const play::GamePlay& game_play() {
         p.install = &install_all;
         p.remove = &remove_all;
         p.frame = &frame_all;
-        p.settings_menu = &settings_menu;   // fefw_menu.cpp: the F1 menu in place of the base settings page
+        p.settings_menu = &settings_menu;
+        p.display_live = &display_live;   // fefw_menu.cpp: the F1 menu in place of the base settings page
         return p;
     }();
     return t;

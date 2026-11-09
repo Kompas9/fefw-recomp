@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// FSR 3 frame generation ([dlss] frame_gen = fsr3, notes/framegen.md): the FidelityFX API 1.1.4 (amd_fidelityfx_vk.dll, the last release
-// with the Vulkan frame-generation swapchain). Its swapchain replaces the renderer's: the swapchain functions of volk are pointed at
+// FSR 3 frame generation ([dlss] frame_gen = fsr3, notes/framegen.md): the FidelityFX API 1.1.4 (amd_fidelityfx_vk.dll; found by
+// ffx_files.h). Its swapchain replaces the renderer's: the swapchain functions of volk are pointed at
 // wrappers when the device is made. It needs no hardware GPU scheduling (unlike DLSS-G).
 #pragma once
 #include <volk.h>
@@ -14,6 +14,7 @@ class Device;
 namespace nxrt::extras {
 
 bool ffx_fg_wanted();   // [dlss] frame_gen = fsr3 and amd_fidelityfx_vk.dll found (read once)
+bool ffx_fg_files();    // amd_fidelityfx_vk.dll found (ffx_files.h), whatever [dlss] frame_gen says
 // Device creation (vk_device.cpp): the queues to add to the graphics family (present, image acquire, async compute; 0 = none), then the
 // install once the device and its first queue exist (before any swapchain).
 uint32_t ffx_fg_extra_queues(uint32_t family_queue_count);
@@ -33,5 +34,8 @@ struct FfxFgFrame {
 // False: FSR 3 frame generation is not running (no FFX swapchain).
 bool ffx_fg_frame(VkCommandBuffer cb, const FfxFgFrame& f);
 uint64_t ffx_fg_present_count();   // presents of the FFX swapchain so far (generated ones included)
+// The window's swapchain is FFX's: the renderer hands its images to the present in SHADER_READ_ONLY_OPTIMAL, the layout FFX reads them in
+// (VUID-vkCmdDraw-None-09600 with PRESENT_SRC_KHR).
+bool ffx_fg_owns_swapchain();
 
 }  // namespace nxrt::extras

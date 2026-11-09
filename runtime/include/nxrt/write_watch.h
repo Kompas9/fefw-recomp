@@ -17,14 +17,17 @@
 #include <atomic>
 #include <cstdint>
 #include <vector>
+#include <string>
 
 namespace nxrt::mem::ww {
 
 struct Region;
 
 // A region over [addr, addr + size) (page aligned down/up). Null when the range is not inside the heap's primary view or the tracker is
-// unavailable. Any thread; the region has one owner thread for the calls below marked "owner".
-Region* region_create(uint64_t addr, uint64_t size);
+// unavailable. owner is a diagnostic name with static lifetime. Any thread; the region has one owner thread for the calls below marked "owner".
+Region* region_create(uint64_t addr, uint64_t size, const char* owner = "unspecified");
+// Crash diagnostics: snapshots atomic ownership bits without taking region locks.
+std::string describe_page(uint64_t addr);
 // Makes every armed page writable again and frees the region. Owner.
 void region_destroy(Region* r);
 uint64_t region_base(const Region* r);

@@ -306,6 +306,9 @@ bool apply_fixed(Sec sec, const std::string& k, const std::string& v, Settings* 
             if (k == "menu_cursor") return set_bool(&s->mouse.menu_cursor);
             if (k == "menu_touch") return true;   // legacy key, dead since it never did anything: accepted and ignored
             if (k == key_wheel_cycles()) return set_bool(&s->mouse.wheel_cycles);
+            if (k == "jc2_speed") return set_real(0.05, 20.0, &s->mouse.jc2_speed);
+            if (k == "jc2_wake") return set_real(0.0, 500.0, &s->mouse.jc2_wake);
+            if (k == "jc2_capture") return set_bool(&s->mouse.jc2_capture);
             break;
         case Sec::Aim:
             if (k == "lock_mode") {
@@ -860,6 +863,9 @@ std::string format_settings(const Settings& s) {
     kv("invert_x", flag(s.mouse.invert_x));
     kv("menu_cursor", flag(s.mouse.menu_cursor));
     kv(key_wheel_cycles(), flag(s.mouse.wheel_cycles));
+    kv("jc2_speed", num(s.mouse.jc2_speed));
+    kv("jc2_wake", num(s.mouse.jc2_wake));
+    kv("jc2_capture", flag(s.mouse.jc2_capture));
 
     o += "\n[aim]\n";
     kv("lock_mode", lock_mode_name(s.aim.lock_mode));

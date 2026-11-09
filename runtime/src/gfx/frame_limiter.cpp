@@ -147,11 +147,14 @@ uint64_t FrameLimiter::begin_frame() {
 namespace {
 std::atomic<bool> g_unpaced{false};
 std::atomic<double> g_interval_hz{0.0};
+std::atomic<double> g_cap_floor{0.0};
 }
 void frame_limiter_set_unpaced(bool on) { g_unpaced.store(on, std::memory_order_relaxed); }
 bool frame_limiter_unpaced() { return g_unpaced.load(std::memory_order_relaxed); }
 void set_present_interval_hz(double hz) { g_interval_hz.store(hz > 0.0 ? hz : 0.0, std::memory_order_relaxed); }
 double present_interval_hz_override() { return g_interval_hz.load(std::memory_order_relaxed); }
+void set_frame_cap_floor(double fps) { g_cap_floor.store(fps > 0.0 ? fps : 0.0, std::memory_order_relaxed); }
+double frame_cap_floor() { return g_cap_floor.load(std::memory_order_relaxed); }
 
 uint64_t FrameLimiter::begin_frame_nohook() {
     Impl& s = *impl_;

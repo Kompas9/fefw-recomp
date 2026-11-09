@@ -15,6 +15,11 @@ entryhook 0x710005d170
 # (`ldr s0, [x19, #0x168]`): s0 = the measured time since the last frame and s1 = the step the game chose (60 / target unless s0 is over it
 # by 0.1), both in frames of 1/59.94 s; the hook may replace s1
 inline 0x710180ef44
+# map cursor (runtime games/fefw/fefw_play.cpp, [fefw] cursor_real_time): game::map::Cursor::Impl::Tick (0x735020) moves the battle / world map
+# cursor by the stick times 5 * 60 / target frame rate (graphics +0x1dc) per frame; at each site s0 = 60 / target was just divided out
+# (`fdiv s0, s1, s0`) and the hook may replace it with the frame's real step
+inline 0x71007358b8
+inline 0x7100735934
 # ultrawide (runtime games/fefw/fefw_wide.cpp, [fefw] ultrawide). The camera, UI, scissor, marker, 2D-effect and movie sites follow Kompas9's
 # MIT-licensed 3440x1440 IPS for this build (github.com/Kompas9/Switch-Game-Patches, games/Fire-Emblem-Fortunes-Weave); the picture / window
 # and off-screen indicator sites are this port's. The runtime computes every value from the output's aspect.

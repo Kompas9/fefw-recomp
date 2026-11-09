@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// AMD FSR 3.1 through the FidelityFX API (temporal.h). The Vulkan DLLs are loaded at run time: the FSR SDK v2.4.0 pair
-// amd_fidelityfx_loader_vk.dll + amd_fidelityfx_upscaler_vk.dll (MIT, signed), or the v1.1.4 amd_fidelityfx_vk.dll; [upscale] fsr_dll names
-// one explicitly, otherwise upscalers\fsr3\ (the release package) or the executable's folder is searched. The upscaler version is the newest the DLL offers for this GPU (FSR 3.1.x; FSR 4 where AMD supports it).
+// AMD FSR 3.1 through the FidelityFX API (temporal.h). The Vulkan DLLs are loaded at run time (ffx_files.h: the FSR SDK v2.4.0
+// amd_fidelityfx_upscaler_vk.dll, through amd_fidelityfx_loader_vk.dll when it sits beside it, or the v1.1.4 amd_fidelityfx_vk.dll; MIT,
+// signed by AMD). The upscaler version is the newest the DLL offers for this GPU (FSR 3.1.x; FSR 4 where AMD supports it).
 #include <windows.h>
 
 #include <cstdio>
 #include <string>
 
+#include "extras/ffx_files.h"
 #include "extras/temporal.h"
 #include "nxrt/extras.h"
 #include "nxrt/gfx.h"
@@ -21,34 +22,6 @@ namespace nxrt::extras {
 namespace {
 
 constexpr const char* kTag = "fsr3";
-
-std::wstring exe_dir() {
-    wchar_t buf[MAX_PATH];
-    const DWORD n = GetModuleFileNameW(nullptr, buf, MAX_PATH);
-    std::wstring p(buf, n);
-    const size_t s = p.find_last_of(L"\\/");
-    return s == std::wstring::npos ? std::wstring() : p.substr(0, s + 1);
-}
-std::wstring widen(const std::string& s) {
-    if (s.empty()) return {};
-    const int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
-    std::wstring w(static_cast<size_t>(n), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), w.data(), n);
-    return w;
-}
-bool exists(const std::wstring& p) { return GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES; }
-
-// The candidates, in order: [upscale] fsr_dll, then the release package's upscalers\fsr3\ folder next to the executable, then the executable's own
-// folder; in each the v2.4.0 loader and the v1.1.4 single DLL.
-std::wstring find_dll() {
-    const std::string cfg = settings().upscale.fsr_dll;
-    if (!cfg.empty()) return exists(widen(cfg)) ? widen(cfg) : std::wstring();
-    const std::wstring exe = exe_dir();
-    for (const std::wstring& dir : {exe + L"upscalers\\fsr3\\", exe})
-        for (const wchar_t* n : {L"amd_fidelityfx_loader_vk.dll", L"amd_fidelityfx_vk.dll"})
-            if (exists(dir + n)) return dir + n;
-    return {};
-}
 
 void on_message(uint32_t type, const wchar_t* msg) {
     char buf[512];
@@ -81,15 +54,16 @@ public:
 
     bool load(gfx::Device& dev) {
         dev_ = &dev;
-        const std::wstring path = find_dll();
+        const FfxFind found = ffx_find_upscaler();
+        const std::wstring& path = found.dll;
         if (path.empty()) {
-            NXLOG_W(kTag, "no FidelityFX DLL: put amd_fidelityfx_loader_vk.dll and amd_fidelityfx_upscaler_vk.dll (FSR SDK v2.4.0, signedbin) in "
-                          "upscalers\\fsr3 next to the executable, or name one in [upscale] fsr_dll");
+            NXLOG_W(kTag, "FSR 3 upscaling is not available: %s. Put AMD's DLLs in upscalers\\fsr next to the launcher (the release package has "
+                          "them there) or name their folder in [upscale] fsr_dll; the built-in upscaler is used", found.missing.c_str());
             return false;
         }
         mod_ = LoadLibraryW(path.c_str());
         if (!mod_) {
-            NXLOG_E(kTag, "LoadLibrary failed (error %lu)", GetLastError());
+            NXLOG_E(kTag, "LoadLibrary of %s failed (error %lu): the built-in upscaler is used", ffx_narrow(path).c_str(), GetLastError());
             return false;
         }
         create_ = reinterpret_cast<PfnFfxCreateContext>(GetProcAddress(mod_, "ffxCreateContext"));
@@ -100,9 +74,7 @@ public:
             NXLOG_E(kTag, "the DLL does not export the FidelityFX API");
             return false;
         }
-        char n[MAX_PATH];
-        WideCharToMultiByte(CP_UTF8, 0, path.c_str(), -1, n, sizeof n, nullptr, nullptr);
-        NXLOG_I(kTag, "FidelityFX API loaded from %s", n);
+        NXLOG_I(kTag, "FidelityFX API loaded from %s (FidelityFX SDK %s files)", ffx_narrow(path).c_str(), found.version.c_str());
         return true;
     }
 
@@ -201,7 +173,7 @@ private:
 
 }  // namespace
 
-bool temporal_ffx_available() { return !find_dll().empty(); }
+bool temporal_ffx_available() { return !ffx_find_upscaler().dll.empty(); }
 
 TemporalBackend* temporal_ffx(void* gfx_device) {
     static Ffx* inst = nullptr;

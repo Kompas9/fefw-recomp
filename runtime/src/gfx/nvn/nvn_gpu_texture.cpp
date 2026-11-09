@@ -1240,7 +1240,7 @@ mem::ww::Region* tex_ww() {
     if (!g_tex_ww_tried) {
         g_tex_ww_tried = true;
         if (nxrt::config_get_bool("nvn", "tex_write_watch", true) && mem::heap_exists())
-            g_tex_ww = mem::ww::region_create(mem::kHeapBase, mem::heap_reserved());
+            g_tex_ww = mem::ww::region_create(mem::kHeapBase, mem::heap_reserved(), "texture heap");
     }
     return g_tex_ww;
 }

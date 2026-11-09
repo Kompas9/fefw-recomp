@@ -8,8 +8,12 @@
 #include <cstdint>
 #include <utility>
 #include <vector>
+#include <string>
 
 namespace nxrt::mem {
+
+// Best-effort crash snapshot; never waits for memory-management locks.
+std::string describe_page(uint64_t addr);
 
 // ---- address-space layout (documented constants; every value is above what a Windows process with HIGHENTROPYVA off uses) ----
 constexpr uint64_t kMainBase = 0x7100000000ull;     // main module image (the game): its lifted address, identity mapped

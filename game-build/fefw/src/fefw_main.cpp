@@ -40,6 +40,7 @@
 #include "nxrt/runtime.h"
 
 #include "fefw/fefw_game.h"   // the Fortune's Weave game module (runtime/games/fefw)
+#include "fefw_cpu.h"         // the CPU features the lifted code needs (FMA3, AVX, CX16), checked before any game code runs
 #include "fefw_paths.h"       // FEFW_EXEFS_DEFAULT, FEFW_MAIN_DEFAULT, FEFW_ROMFS_DEFAULT (game-build/fefw/CMakeLists.txt)
 
 // Two builds of this file (game-build/fefw/CMakeLists.txt):
@@ -200,10 +201,28 @@ std::string fs_path(const char* key, const std::string& cli, const char* def) {
 
 int fefw_run(int argc, char** argv);
 
+// Before the first lifted instruction: a CPU without FMA3 / AVX / CX16 would die on an illegal instruction in a blank window (issues 33, 5).
+// Says which feature is missing in a message box, on stderr and in fefw_fatal.txt (the launcher offers it), then ends with code 4.
+void check_cpu_or_exit() {
+    const fefw_cpu::Report r = fefw_cpu::probe();
+    if (r.ok()) return;
+    const std::string msg = fefw_cpu::message(r);
+    std::fprintf(stderr, "fefw: %s\n", msg.c_str());
+    if (FILE* f = std::fopen("fefw_fatal.txt", "w")) {
+        std::fprintf(f, "fefw cannot start on this processor.\n\n%s\n\nCPU features: FMA3 %s, AVX %s, CMPXCHG16B %s\n", msg.c_str(), r.fma ? "yes" : "NO",
+                     r.avx ? "yes" : "NO", r.cx16 ? "yes" : "NO");
+        std::fclose(f);
+    }
+    MessageBoxA(nullptr, msg.c_str(), "fefw: this processor is too old", MB_OK | MB_ICONERROR);
+    TerminateProcess(GetCurrentProcess(), 4);
+    for (;;) {}
+}
+
 }  // namespace
 
 #ifdef FEFW_RT_DLL
 extern "C" int fefw_rt_main(int argc, char** argv, const FefwRtModules* m) {
+    check_cpu_or_exit();
     if (!m || m->size < sizeof(FefwRtModules) || m->api != FEFW_RT_API) {
         MessageBoxA(nullptr, "fefw.exe and fefw_rt.dll are from different releases: run Set up again in the launcher.", "fefw", MB_OK | MB_ICONERROR);
         return 3;
@@ -218,6 +237,7 @@ extern "C" int fefw_rt_main(int argc, char** argv, const FefwRtModules* m) {
 }
 #else
 int main(int argc, char** argv) {
+    check_cpu_or_exit();
     const NxModule* nx[6] = {&nxmod_rtld, &nxmod_main, &nxmod_subsdk0, &nxmod_subsdk1, &nxmod_subsdk2, &nxmod_sdk};
     const uint32_t* abi[6] = {&nxmod_rtld_abi, &nxmod_main_abi, &nxmod_subsdk0_abi, &nxmod_subsdk1_abi, &nxmod_subsdk2_abi, &nxmod_sdk_abi};
     for (int i = 0; i < 6; i++) {

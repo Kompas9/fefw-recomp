@@ -617,6 +617,7 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     VkPhysicalDevicePresentIdFeaturesKHR apid = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR};
     VkPhysicalDeviceAntiLagFeaturesAMD aal = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ANTI_LAG_FEATURES_AMD};
     VkPhysicalDevicePipelineRobustnessFeaturesEXT aprb = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_ROBUSTNESS_FEATURES_EXT};
+    VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR acsd = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR};
     std::vector<const char*> dev_exts;
     void* chain = nullptr;
     auto add_ext = [&](const char* name, void* feat_struct) {
@@ -655,6 +656,9 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     // robust access per pipeline, for the translated shaders' uniform buffers only (nvn_pipeline.cpp ubo_robustness); robustness2 is
     // enabled for its pipeline behaviour, not its device-wide features (left off: they cost speed)
     const bool x_prb = add_ext(VK_EXT_PIPELINE_ROBUSTNESS_EXTENSION_NAME, &aprb);
+    // the FSR SDK v2.4.0 upscaler builds compute shaders with derivative groups wherever the GPU offers them (it does not check that the
+    // device enabled them: VUID-VkShaderModuleCreateInfo-pCode-08740 / 08742 otherwise); the NV extension shares the feature struct
+    if (!add_ext(VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME, &acsd)) add_ext(VK_NV_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME, &acsd);
     bool rba2 = false;
     if (x_prb && has_dext(VK_EXT_ROBUSTNESS_2_EXTENSION_NAME)) {
         VkPhysicalDeviceRobustness2FeaturesEXT r2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT};

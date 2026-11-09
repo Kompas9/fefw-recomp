@@ -292,3 +292,122 @@ NXTEST(region_table_growth_while_faulting) {
     CHECK(writes.load() != 0);
     teardown(r);
 }
+
+// Distinct owners (texture tracker and pool mirror) may cover the same pages.
+NXTEST(overlapping_owners_arm_concurrently) {
+    auto* a = setup();
+    REQUIRE(a != nullptr);
+    auto* b = ww::region_create(mem::kHeapBase, kPages * kPg);
+    REQUIRE(b != nullptr);
+    std::atomic<int> phase{0}, ready{0}, both{0};
+    bool ok[2]{};
+    auto run = [&](int id, ww::Region* r) {
+        for (int i = 1; i <= 10000; ++i) {
+            while (phase.load() != i) YieldProcessor();
+            ok[id] = ww::arm(r, 0, 1);
+            ready.fetch_add(1);
+            while (phase.load() == i) YieldProcessor();
+        }
+    };
+    std::thread ta(run, 0, a), tb(run, 1, b);
+    for (int i = 1; i <= 10000; ++i) {
+        ready.store(0);
+        phase.store(i);
+        while (ready.load() != 2) YieldProcessor();
+        if (ok[0] && ok[1]) both.fetch_add(1);
+        ww::forget(mem::kHeapBase, kPg, false);
+        phase.store(-i);
+        // Workers must observe the end of this phase before the next begins.
+        // The next phase's different positive value also releases their wait.
+    }
+    ta.join(); tb.join();
+    CHECK_EQ(both.load(), 0);
+    ww::region_destroy(b);
+    teardown(a);
+}
+
+NXTEST(destroy_and_recreate_while_writers_fault) {
+    auto* r = setup();
+    REQUIRE(r != nullptr);
+    std::atomic<bool> stop{false};
+    std::atomic<unsigned> failed{0}, writes{0};
+    std::vector<std::thread> writers;
+    for (int i = 0; i < 4; ++i) writers.emplace_back([&] {
+        while (!stop.load()) {
+            if (write_passes_or_faults(mem::kHeapBase)) failed.fetch_add(1);
+            writes.fetch_add(1);
+        }
+    });
+    for (int i = 0; i < 3000; ++i) {
+        ww::arm(r, 0, 1);
+        ww::region_destroy(r);
+        r = ww::region_create(mem::kHeapBase, kPages * kPg);
+    }
+    stop.store(true);
+    for (auto& t : writers) t.join();
+    CHECK_EQ(failed.load(), 0u);
+    CHECK(writes.load() > 0);
+    teardown(r);
+}
+
+namespace {
+std::atomic<bool> delayed_entered{false}, delayed_resume{false};
+LONG CALLBACK delay_write_fault(EXCEPTION_POINTERS* ep) {
+    auto* e = ep->ExceptionRecord;
+    if (e->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && e->NumberParameters >= 2 &&
+        e->ExceptionInformation[1] == mem::kHeapBase) {
+        delayed_entered.store(true);
+        while (!delayed_resume.load()) YieldProcessor();
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+}
+NXTEST(fault_delivered_after_last_region_destroyed) {
+    auto* r = setup();
+    REQUIRE(r != nullptr);
+    REQUIRE(ww::arm(r, 0, 1));
+    delayed_entered.store(false); delayed_resume.store(false);
+    auto veh = AddVectoredExceptionHandler(1, delay_write_fault);
+    REQUIRE(veh != nullptr);
+    bool failed = false;
+    std::thread writer([&] { failed = write_passes_or_faults(mem::kHeapBase); });
+    while (!delayed_entered.load()) YieldProcessor();
+    ww::region_destroy(r);
+    delayed_resume.store(true);
+    writer.join();
+    RemoveVectoredExceptionHandler(veh);
+    CHECK(!failed);
+    CHECK_EQ(prot_of(mem::kHeapBase), (DWORD)PAGE_READWRITE);
+    mem::shutdown();
+}
+
+NXTEST(guarded_pages_boundaries_and_mapping_changes) {
+    auto* a = setup();
+    REQUIRE(a != nullptr);
+    auto* b = ww::region_create(mem::kHeapBase + kPg, kPg, "boundary owner");
+    REQUIRE(b != nullptr);
+    REQUIRE(ww::arm(a, 0, 1));
+    REQUIRE(ww::arm(b, 0, 1));
+    REQUIRE(ww::guard(b, 0, 1));
+    CHECK(!ww::arm(a, 1, 1)); // cannot take another owner's guard
+    CHECK(ww::describe_page(mem::kHeapBase + kPg).find("guard=1") != std::string::npos);
+    // One native store crosses both region and page boundaries. Each fault must
+    // release the correct owner, including the guard on the second page.
+    *reinterpret_cast<volatile uint64_t*>(mem::kHeapBase + kPg - 4) = 0x123456789abcdef0ull;
+    CHECK(!ww::page_valid(a, 0));
+    CHECK(!ww::page_valid(b, 0));
+    ww::region_destroy(b);
+    CHECK(mem::heap_decommit(kPg, kPg));
+    CHECK(write_passes_or_faults(mem::kHeapBase + kPg)); // retired does not authorize NOACCESS
+    CHECK(!ww::arm(a, 1, 1));
+    CHECK(mem::heap_commit(kPg, kPg));
+    CHECK(!write_passes_or_faults(mem::kHeapBase + kPg));
+    REQUIRE(ww::arm(a, 1, 1));
+    REQUIRE(ww::guard(a, 1, 1));
+    {
+        ww::OsWriteScope scope(reinterpret_cast<void*>(mem::kHeapBase + kPg), kPg);
+        CHECK_EQ(prot_of(mem::kHeapBase + kPg), (DWORD)PAGE_READWRITE);
+        CHECK(!ww::guard(a, 1, 1));
+    }
+    teardown(a);
+}

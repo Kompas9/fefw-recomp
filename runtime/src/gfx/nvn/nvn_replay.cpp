@@ -4134,6 +4134,7 @@ void run_list(const CmdList& list, int depth) {
             case Op::ResolveDepth: note_unsupported("ResolveDepthBuffer"); break;
             case Op::EvaluateDlss:                                                    // the host upscaler (api_dlss_replay.cpp) binds its own compute state
                 end_pass();
+                TRACE("dlss evaluation (the scene is upscaled here; frame generation's inputs)");
                 dlss_replay(*F, r.payload<P_EvaluateDlss>().eval);
                 g_dirty = kAllDirty;
                 gstamp("dlss");

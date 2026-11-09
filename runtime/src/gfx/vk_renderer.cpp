@@ -18,6 +18,7 @@
 #include "nxrt/lowlat.h"
 #include "nxrt/platform.h"
 #include "extras/framegen.h"
+#include "extras/framegen_ffx.h"
 #include "extras/hdr_capture.h"
 #include "extras/hdr_math.h"
 #include "extras/win_display.h"
@@ -55,6 +56,9 @@ const ImageState kColorAtt = {VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPEL
                               VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT};
 const ImageState kTransferSrc = {VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT};
 const ImageState kPresent = {VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_PIPELINE_STAGE_2_NONE, 0};
+// FSR 3 frame generation's swapchain (framegen_ffx.h): its images are plain images that FFX itself reads as SHADER_READ_ONLY_OPTIMAL (its
+// composition, interpolation and queue transfers all assume that layout, and it never moves them out of PRESENT_SRC_KHR)
+const ImageState kFfxPresent = {VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_NONE, 0};
 
 }  // namespace
 
@@ -751,9 +755,9 @@ void Renderer::end_frame(SubmitPrefix* prefix) {
         di.memoryBarrierCount = 1;
         di.pMemoryBarriers = &mb;
         vkCmdPipelineBarrier2(slot.cmd, &di);
-        if (!s.headless) barrier(slot.cmd, t.image, kTransferSrc, kPresent);
+        if (!s.headless) barrier(slot.cmd, t.image, kTransferSrc, extras::ffx_fg_owns_swapchain() ? kFfxPresent : kPresent);
     } else if (!s.headless) {
-        barrier(slot.cmd, t.image, kColorAtt, kPresent);
+        barrier(slot.cmd, t.image, kColorAtt, extras::ffx_fg_owns_swapchain() ? kFfxPresent : kPresent);
     }
     if (slot.queries) {
         vkCmdWriteTimestamp2(slot.cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, slot.queries, 1);

@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <atomic>
 #include <functional>
+#include <cstdio>
 #include <map>
 #include <mutex>
 #include <string>
@@ -732,6 +733,35 @@ bool heap_offset_of(uint64_t addr, uint64_t* offset) {
 
 // ---------------------------------------------------------------------------------------------------------------------
 // vm map (svcQueryMemory)
+
+std::string describe_page(uint64_t addr) {
+    std::string out;
+    char line[256];
+    {
+        std::unique_lock lk(g_heap_mu, std::try_to_lock);
+        if (!lk.owns_lock()) out += "  heap metadata: busy\n";
+        else if (addr >= kHeapBase && addr - kHeapBase < g_heap_size) {
+            const uint64_t pg = (addr - kHeapBase) / kPage;
+            std::snprintf(line, sizeof line, "  heap metadata: page=%llu committed=%d class=%u epoch=%llu (class: 0=reserved 1=noaccess 2=readonly 3=readwrite)\n",
+                (unsigned long long)pg, bit_test(pg), (unsigned)g_heap_cls[pg], (unsigned long long)g_heap_epoch.load());
+            out += line;
+        } else out += "  heap metadata: outside primary heap\n";
+    }
+    {
+        std::unique_lock lk(g_vm_mu, std::try_to_lock);
+        if (!lk.owns_lock()) out += "  guest VM metadata: busy\n";
+        else {
+            auto it = g_vm.upper_bound(addr);
+            if (it != g_vm.begin() && addr - std::prev(it)->second.addr < std::prev(it)->second.size) {
+                const auto& v = std::prev(it)->second;
+                std::snprintf(line, sizeof line, "  guest VM: base=0x%llx size=0x%llx state=0x%x perm=0x%x\n",
+                    (unsigned long long)v.addr, (unsigned long long)v.size, v.state, v.perm);
+                out += line;
+            } else out += "  guest VM: free\n";
+        }
+    }
+    return out;
+}
 
 void vm_set(uint64_t addr, uint64_t size, uint32_t state, uint32_t perm) {
     if (size == 0 || addr + size < addr) return;

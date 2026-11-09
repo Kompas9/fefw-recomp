@@ -50,10 +50,12 @@ bool exists(const std::wstring& p) { return GetFileAttributesW(p.c_str()) != INV
 
 // The Streamline files a DLSS run needs (frame generation adds more, see streamline_preinit).
 constexpr const wchar_t* kRequired[] = {L"sl.interposer.dll", L"sl.common.dll", L"sl.dlss.dll", L"nvngx_dlss.dll"};
+// ... and the ones DLSS Frame Generation adds (Reflex and PCL are required by DLSS-G; NvLowLatencyVk.dll is Reflex on Vulkan)
+constexpr const wchar_t* kRequiredFg[] = {L"sl.dlss_g.dll", L"sl.reflex.dll", L"sl.pcl.dll", L"nvngx_dlssg.dll", L"NvLowLatencyVk.dll"};
 
 // The folder holding sl.interposer.dll: [upscale] dlss_dll (a folder, or the path of sl.interposer.dll / any file in it); unset: the folder
-// upscalers\streamline next to the executable (the release package: next to the launcher), else the same in the run folder (the working directory), else the
-// executable's own folder.
+// upscalers\streamline next to the executable, else next to the launcher (NXRT_LAUNCHER_DIR), else in the run folder (the working directory), else
+// the executable's own folder.
 std::wstring sl_dir() {
     std::wstring p = widen(settings().upscale.dlss_dll);
     if (p.empty()) {
@@ -66,7 +68,12 @@ std::wstring sl_dir() {
         const DWORD cn = GetCurrentDirectoryW(MAX_PATH, cwd);
         std::wstring run(cwd, cn);
         if (!run.empty() && run.back() != L'\\') run += L'\\';
-        for (const std::wstring& base : {exe, run}) {
+        wchar_t ld[MAX_PATH];   // the launcher's folder (NXRT_LAUNCHER_DIR, set by the launcher): the run folder may be elsewhere
+        const DWORD ln = GetEnvironmentVariableW(L"NXRT_LAUNCHER_DIR", ld, MAX_PATH);
+        std::wstring launcher = ln && ln < MAX_PATH ? std::wstring(ld, ln) : std::wstring();
+        if (!launcher.empty() && launcher.back() != L'\\') launcher += L'\\';
+        for (const std::wstring& base : {exe, launcher, run}) {
+            if (base.empty()) continue;
             const std::wstring pkg = base + L"upscalers\\streamline\\";
             if (exists(pkg + L"sl.interposer.dll")) return pkg;
         }
@@ -268,6 +275,13 @@ bool temporal_dlss_available() {
     return true;
 }
 bool temporal_dlss_started() { return sl_state().started; }
+bool streamline_framegen_files() {
+    if (!temporal_dlss_available()) return false;
+    const std::wstring dir = sl_dir();
+    for (const wchar_t* f : kRequiredFg)
+        if (!exists(dir + f)) return false;
+    return true;
+}
 
 // The NVN2 DLSS API's host upscaler (src/gfx/nvn/api_dlss_replay.cpp) wants Streamline with [dlss] upscaler = dlss, and with auto when the
 // DLLs are there.
@@ -331,10 +345,15 @@ PFN_vkGetInstanceProcAddr streamline_preinit() {
     paths[0] = plugin_dir.c_str();
     static const sl::Feature features[] = {sl::kFeatureDLSS, sl::kFeatureDLSS_G, sl::kFeatureReflex, sl::kFeaturePCL};
     bool fg = framegen_dlss();
-    if (fg && !(exists(dir + L"sl.dlss_g.dll") && exists(dir + L"sl.reflex.dll") && exists(dir + L"sl.pcl.dll") && exists(dir + L"nvngx_dlssg.dll")))
-    {
-        NXLOG_W(kTag, "DLSS-G off: required frame generation DLLs missing in %s; using ordinary presentation", narrow(dir).c_str());
-        fg = false;
+    if (fg) {
+        std::string missing;
+        for (const wchar_t* f : kRequiredFg)
+            if (!exists(dir + f)) missing += (missing.empty() ? "" : ", ") + narrow(f);
+        if (!missing.empty()) {
+            NXLOG_W(kTag, "DLSS Frame Generation off: %s lacks %s (Streamline SDK bin/x64; frame generation needs sl.dlss_g.dll, sl.reflex.dll, "
+                          "sl.pcl.dll, nvngx_dlssg.dll and NvLowLatencyVk.dll beside the four DLSS files)", narrow(dir).c_str(), missing.c_str());
+            fg = false;
+        }
     }
     sl::Preferences pref;
     pref.showConsole = false;

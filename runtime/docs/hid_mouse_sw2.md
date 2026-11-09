@@ -110,24 +110,70 @@ Wheel units: *inferred* 120 per notch (the game clamps its sum at ±600).
 `index * 0x2C8`, index = npad × 2 + type (JcmsHandle = npad | type << 8, npad < 8, type 0 or 1). Lifo of 17 × (u64 seqlock,
 0x20-byte JcmsState); JcmsState: +0x08 sampling number, +0x10 u64 read by the placement code, the rest unknown.
 
+## Fortune's Weave (main of update 131072)
+
+Read in main (`work`-side scripts, not shipped); `runtime/games/fefw/fefw_mouse.cpp` reads the same fields for the log and the F1 menu.
+
+- Setup (0x6509e8): `InitializeNmouse(buf, 0xC000, 1920, 1080)` and the two button configs (0x1c5cd10, 0x1c5cd18). No Jcms.
+- Every frame (0x19c6ea0, from the input update 0x650280; the input object is `[GOT 0x216a4b0]`, the mouse manager at +0x2c8): for each
+  handle of npad 0 (`GetNmouseHandles(…, 2, 0)`) it reads the type set (bit 2 right, bit 1 left: records +0x00 / +0x60), then
+  `GetNmouseState` into the record and **`SetNmousePointerPosition(handle, 960, 540)`**: the pointer goes back to the centre every frame and
+  the frame's movement is `x - 960`, `y - 540` (record +0x3c / +0x40). Buttons: +0x30 held (from the state's +0x28), +0x34 pressed,
+  +0x38 released; the battle cursor reads the left button held (input +0x2f8 bit 0, 0x73511c). Wheel sums at +0x44 / +0x48.
+- Mouse mode: while attribute bit 1 is set the record's +0x50 counts frames up to +0xc8 (30), but only while the Joy-Con's accelerometer
+  says it lies flat (controller +0x18 <= +0xd0, -0.8; a PC pad never does), or jumps there when one frame's movement squared is over
+  +0xcc (12000, ~110 units); then +0x5e = 1 (mouse mode) and the right mouse's movement moves the game's pointer (+0xdc / +0xe0, kept
+  in 1920 x 1080). Once the bit clears, +0x4c counts frames and mode ends after +0xd8 (120), or after +0xd4 (20) when the Joy-Con's
+  orientation changed. The values are logged at start (`game mouse controls: ...`). "Mouse mode?" (0x19c7210, ~90 callers, and inlined copies): seen (+0x5f) and (SL + SR mode +0x5c, or enabled +0xe4
+  and allowed +0x5d and +0x5e).
+- Settings (the game's own Settings menu; read by 0x1584e.. / 0x1585020 into the mouse system `[0x22983a8]` and the flags above):
+  System: "Method for Switching to Mouse" (automatic / manual: SL + SR together), "Menu Cursor Speed (Mouse)"; battle maps: "Map Cursor
+  Speed (Mouse)", "Camera Sensitivity (Mouse)"; bases and dungeons: "Camera Sensitivity (Mouse)". Calibration ("Calibrate Angle", the
+  Joy-Con held at an angle) only rotates a real Joy-Con's motion; a PC mouse needs none (keep it at the default; "Reset Calibration").
+- The mouse system `[0x22983a8]` turns the record's movement into +0x208 / +0x20c (rotated by the calibration angle +0x234, degrees,
+  0 by default) and keeps a stack of "situations" (+0xa0 deque; 13 in the Dagsion plaza) that the consumers check.
+- In mouse mode (System > Mouse Controls lists it per scene): bases and dungeons turn the camera with the mouse (Camera Control; the
+  wheel zooms while standing still; left click Access / Attack, right click Cancel / Menu; the left stick still walks), battle maps
+  move the map cursor with it (`game::map::Cursor::Impl::Tick` 0x735020 reads the mouse system; "the faster you move it, the farther the
+  cursor moves"), menus move their selection by the mouse's motion (the base menu: about one entry per 500 units up or down at the
+  default Menu Cursor Speed, wrapping; no pointer is drawn there; `gameui::MouseCursor` draws one where a screen uses +0xdc / +0xe0).
+  Measured in the plaza
+  at 30 fps: 3 and 6 units per frame did not turn the camera at all, 12 and 24 turned it (about 0.07 degrees per unit above that), so
+  a slow hand on a 1:1 PC mouse falls under the camera's threshold. Clicks: left = R, right = ZR per the game's guide (0_ISM_Battle.msbt),
+  sent as npad buttons; the battle cursor also reads the Nmouse left button.
+
 ## What the runtime does
 
 - `src/services/hid.cpp`: the commands above; InitializeNmouse/InitializeJcms keep the guest buffer (a guest address is a host pointer),
   zero it, set up the rings and, unless `[input] jc2_mouse = off`, list two devices: a merged mouse (slot 0, type 1) and a Joy-Con (R)
   mouse of player 1 (slot 1, type 4, npad 0). The sampler (every 5 ms) pushes the same state into both rings and empty Jcms states
   for player 1.
-- The state comes from `nxrt::hid::jc2_mouse_feed()` (`include/nxrt/jc2_mouse.h`), which play mode calls once per frame with the pointer
-  on the picture, the buttons and the wheel. x, y = picture position × the pointer range, +0x18/+0x1C = that range (InitializeNmouse,
-  or SetNmousePointerRanges later); attributes bit 1 is set while
-  `jc2_mouse_active()`: mode not off, devices listed, window focused, a feed in the last 250 ms, and the mouse not captured.
-- Logs: InitializeNmouse/InitializeJcms with the block address, the device listing, the first three StartJcms calls (proof the game read
-  the handle table), every on/off change of the mouse (first 200), and the first three samples with movement, buttons or wheel.
+- The device is a mouse that moves, as a real Joy-Con 2: a virtual pointer in the pointer range, moved by the PC mouse's motion
+  (`jc2_mouse_feed`: counts since the last feed times `[mouse] jc2_speed`) and placed by `SetNmousePointerPosition` (3140). Where the
+  Windows pointer is on the window does not matter. (Before 0.1.6 x, y were the pointer's position on the window: Fortune's Weave,
+  which re-centres every frame, read the distance from the window's centre as a movement every frame and its cursor ran off.)
+- Attribute bit 1 ("on its surface") is who has control. `auto`: set when the mouse moves `[mouse] jc2_wake` counts within 0.25 s over
+  the picture, clicks or scrolls; cleared at once by any key or pad input (`jc2_mouse_other_input`, from play.cpp's key and pad
+  handling), so the last device used wins and a still or jittery mouse never switches the game. `on`: always set while the window has
+  focus. Motion while lifted only counts toward waking it.
+- Fortune's Weave (`games/fefw/fefw_mouse.cpp`, `[fefw] mouse_switch_now`): with the game's switching method on automatic, the game's
+  mode follows the attribute at once (on: +0x50 = +0xc8; off: +0x5e = 0) instead of its 30-frame flat-on-the-table wait (which a PC
+  never satisfies) and 120-frame tail. When mode starts, the game's pointer is put where the Windows pointer was (picture u, v to
+  1920 x 1080 UI units through the centred 16:9 region when ultrawide is active); while it runs, its position is handed back so play
+  mode puts the Windows pointer there when it frees the mouse.
+- While it is on its surface play mode captures the mouse (`[mouse] jc2_capture`): relative raw motion, no Windows pointer (the game
+  draws its own), no window edge. Released when it is lifted, on focus loss and while the F1 menu is open. Left / right click are npad
+  R / ZR while it is on its surface (held 50 ms at least), as the Joy-Con 2 (R)'s own buttons; the click that puts it down is not a press.
+- Logs: InitializeNmouse/InitializeJcms with the block address, the device listing, the first three StartJcms and SetNmousePointerPosition
+  calls, every on-surface / lifted change (first 200), the first three samples with movement, buttons or wheel, and (fefw) `game mouse
+  controls ON/off` with the counts and the game's own thresholds once.
 - cmd 214 is `SendVibrationValues` in its Switch 2 form (the SDK uses it unless the Switch 1 compatible mode is on; 206 otherwise):
   same two buffers plus a u16 (2). It is stored and forwarded to the pad rumble like 206.
 
 ## Handing the mouse over (camera owner)
 
-- Before turning the camera with mouse counts each frame: if `nxrt::hid::jc2_mouse_active()` is true, drop the counts.
+- Before turning the camera with mouse counts each frame: if `nxrt::hid::jc2_mouse_engaged()` is true (the device is on its surface),
+  drop the counts.
 - In auto mode, to give the mouse to the game (placement or Rock Smash, once detected, or a key): `jc2_mouse_request(true)`, and
   `jc2_mouse_request(false)` to take it back. Play mode stops capturing while `jc2_mouse_wants_pointer()` is true (mode on, or auto with
   a request), so the pointer becomes absolute and the Joy-Con 2 mouse goes on its surface.

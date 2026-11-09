@@ -87,4 +87,10 @@ bool frame_limiter_unpaced();
 // present_interval_hz. A game module that raises the game's own display rate sets it (fefw's fps120: 120). Safe from any thread.
 void set_present_interval_hz(double hz);
 double present_interval_hz_override();
+
+// The lowest frame rate a game module needs from the frame limit (0 = none). A numeric [display] fps_limit below it is raised to it, so a
+// game mode that runs above the shipped limit (fefw's fps120 against fps_limit = 60) works without the player editing the limit; "auto" and
+// vsync are not touched (the display decides). Play mode re-applies the cap after the game's hooks are installed. Safe from any thread.
+void set_frame_cap_floor(double fps);
+double frame_cap_floor();
 }  // namespace nxrt
