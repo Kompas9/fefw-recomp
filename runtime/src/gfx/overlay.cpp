@@ -2,6 +2,8 @@
 // Dear ImGui overlay (declarations in include/nxrt/overlay.h). ImGui and its Vulkan backend are pinned in cmake/gfx_deps.cmake.
 #include "nxrt/overlay.h"
 
+#include <windows.h>
+
 #include <atomic>
 #include <mutex>
 
@@ -27,6 +29,7 @@
 #include "nxrt/config.h"
 #include "nxrt/input_source.h"
 #include "nxrt/log.h"
+#include "nxrt/menu_i18n.h"
 #include "nxrt/nvn.h"
 #include "nxrt/platform.h"
 #include "nxrt/services_api.h"
@@ -448,7 +451,48 @@ std::unique_ptr<Overlay> Overlay::create(const Context& ctx, std::string* error)
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
     io.BackendFlags |= ImGuiBackendFlags_HasGamepad;      // set_menu_pad feeds it
     ImGui::StyleColorsDark();
-    io.Fonts->AddFontDefaultVector();          // the scalable default font: stays sharp at every UI scale (update_scale)
+    // UI font: a CJK-capable face for [gfx] ui_language packs, else the scalable built-in default. ImGui 1.92's
+    // dynamic glyphs load only what the UI shows, so a system CJK font costs nothing until it is drawn.
+    {
+        std::string font = config_get_str("gfx", "ui_font", "");
+        std::string lang = config_get_str("gfx", "ui_language", "auto");
+        const bool wants_cjk = !(lang.empty() || lang == "auto" || lang == "en" || lang == "en-US") || !font.empty();
+        std::string chosen;
+        if (wants_cjk) {
+            const auto exists = [](const std::string& p) {
+                WIN32_FILE_ATTRIBUTE_DATA a;
+                return p.size() < MAX_PATH && GetFileAttributesExA(p.c_str(), GetFileExInfoStandard, &a) &&
+                       !(a.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
+            };
+            if (!font.empty() && exists(font)) chosen = font;
+            if (chosen.empty()) {
+                char buf[MAX_PATH];
+                if (GetModuleFileNameA(nullptr, buf, MAX_PATH) > 0) {
+                    std::string dir(buf);
+                    const size_t slash = dir.find_last_of("\\/");
+                    if (slash != std::string::npos) {
+                        dir.resize(slash);
+                        static const char* const kLocal[] = {"fonts\\ui.ttf", "fonts\\font.ttf"};
+                        for (const char* c : kLocal)
+                            if (exists(dir + "\\" + c)) { chosen = dir + "\\" + c; break; }
+                    }
+                }
+            }
+            if (chosen.empty()) {
+                static const char* const kSystem[] = {
+                    "C:\\Windows\\Fonts\\msyh.ttc", "C:\\Windows\\Fonts\\simhei.ttf", "C:\\Windows\\Fonts\\Deng.ttf",
+                };
+                for (const char* c : kSystem)
+                    if (exists(c)) { chosen = c; break; }
+            }
+        }
+        if (!chosen.empty() && io.Fonts->AddFontFromFileTTF(chosen.c_str(), 0.0f))
+            NXLOG_I(kTag, "UI font: %s ([gfx] ui_language %s)", chosen.c_str(), lang.c_str());
+        else {
+            if (wants_cjk) NXLOG_W(kTag, "no CJK font found ([gfx] ui_font '%s'): using the built-in default", font.c_str());
+            io.Fonts->AddFontDefaultVector();   // the scalable default font: stays sharp at every UI scale (update_scale)
+        }
+    }
     ImGui::GetStyle().FontSizeBase = 16.0f;
     s.base_style = ImGui::GetStyle();
     const VkExtent2D e = ctx.renderer->extent();
