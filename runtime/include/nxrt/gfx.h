@@ -65,7 +65,9 @@ struct ValidationStats {
     std::string first_error;              // text of the first error since the last reset
 };
 
-enum class MemoryUse { GpuOnly, Upload, Readback };   // host-visible memory is mapped persistently
+// Upload: written by the CPU, read by the GPU in place (where the allocator likes: device-local when the usage is more than a copy source).
+// Staging: the same, always in system memory (short-lived copies of data on its way into an image or a device-local buffer).
+enum class MemoryUse { GpuOnly, Upload, Readback, Staging };   // host-visible memory is mapped persistently
 
 struct ImageDesc {
     VkImageType type = VK_IMAGE_TYPE_2D;

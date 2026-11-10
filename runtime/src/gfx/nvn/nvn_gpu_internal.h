@@ -250,6 +250,7 @@ VkFormat tex_vk_format(Texture* t);
 VkImageAspectFlags tex_aspect(Texture* t);
 VkExtent3D tex_extent(Texture* t, uint32_t level = 0);
 uint32_t tex_levels(Texture* t);
+uint32_t tex_level_drop(Texture* t);   // NVN levels the image leaves out at the top ([gfx] texture_detail; 0 for nearly every texture)
 uint32_t tex_layers(Texture* t);
 bool tex_is_depth(Texture* t);
 // Sampled image view for a binding (cached). Null when impossible (the caller binds the dummy view).

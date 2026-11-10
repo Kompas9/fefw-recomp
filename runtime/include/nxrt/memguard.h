@@ -21,6 +21,11 @@ uint64_t memguard_footprint();       // bytes of private commit of this process 
 // subtracts what this function returns (the GPU's dedicated usage of this process; the Vulkan device sets it). Null: no subtraction.
 // Without it a game at 4K, with 5 GB of textures and render targets in video memory, ran into the 8 GB limit with only 3 GB of host memory.
 void memguard_set_discount(uint64_t (*gpu_bytes)());
+// Video memory of the device the game renders on, for the 30 s log line (the Vulkan device sets it; null: not logged). usage and budget
+// describe the largest device-local heap as the driver reports them (VK_EXT_memory_budget; estimates without it), heap is that heap's
+// size, driver_bytes every vkAllocateMemory of this process (host imports included).
+struct MemGuardVideo { uint64_t usage = 0, budget = 0, heap = 0, driver_bytes = 0; bool exact = false; };
+void memguard_set_video(void (*fn)(MemGuardVideo*));
 uint64_t memguard_footprint_host();  // memguard_footprint() minus the discount (what the guard compares with the limit)
 double memguard_limit_gb(const char* env_text);   // positive number or 8.0
 void memguard_start(const MemGuardOptions& opt = {});

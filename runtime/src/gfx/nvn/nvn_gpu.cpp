@@ -405,7 +405,7 @@ UploadAlloc Frame::staging(VkDeviceSize size) {
     gfx::Buffer b;
     const VkBufferUsageFlags usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
                                      VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
-    if (g->dev->create_buffer(std::max<VkDeviceSize>(size, 256), usage, gfx::MemoryUse::Upload, &b, "nvn staging") != VK_SUCCESS) {
+    if (g->dev->create_buffer(std::max<VkDeviceSize>(size, 256), usage, gfx::MemoryUse::Staging, &b, "nvn staging") != VK_SUCCESS) {
         NXLOG_E(kTag, "staging buffer of %llu bytes failed", static_cast<unsigned long long>(size));
         return {};
     }

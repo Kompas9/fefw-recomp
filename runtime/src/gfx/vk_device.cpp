@@ -297,6 +297,22 @@ uint64_t gpu_bytes_for_guard() {      // the device's dedicated memory in use by
     return static_cast<uint64_t>(b[g_guard_heap].usage);
 }
 
+bool g_budget_exact = false;           // VK_EXT_memory_budget is on: heap usage and budget are the driver's figures
+int g_video_heap = -1;                 // the largest device-local heap (guarded by g_guard_mu, as the allocator pointer)
+void video_for_guard(nxrt::MemGuardVideo* out) {
+    std::lock_guard<std::mutex> lk(g_guard_mu);
+    if (!g_guard_vma || g_video_heap < 0) return;
+    VmaBudget b[VK_MAX_MEMORY_HEAPS] = {};
+    vmaGetHeapBudgets(g_guard_vma, b);
+    const VkPhysicalDeviceMemoryProperties* mp = nullptr;
+    vmaGetMemoryProperties(g_guard_vma, &mp);
+    out->usage = b[g_video_heap].usage;
+    out->budget = b[g_video_heap].budget;
+    out->heap = mp ? mp->memoryHeaps[g_video_heap].size : 0;
+    out->driver_bytes = static_cast<uint64_t>(std::max<int64_t>(0, nxrt::vk_gauge_memory_bytes().get()));
+    out->exact = g_budget_exact;
+}
+
 void register_vma_gauges(VmaAllocator a, VkPhysicalDeviceType type) {
     const uint32_t heap = device_local_heap(a);
     {
@@ -305,8 +321,10 @@ void register_vma_gauges(VmaAllocator a, VkPhysicalDeviceType type) {
         std::lock_guard<std::mutex> lk(g_guard_mu);
         g_guard_heap = mp ? vk_guard_discount_heap(*mp, type) : -1;
         g_guard_vma = a;
+        g_video_heap = static_cast<int>(heap);
     }
     nxrt::memguard_set_discount(&gpu_bytes_for_guard);
+    nxrt::memguard_set_video(&video_for_guard);
     auto cache = std::make_shared<VmaStatsCache>();
     nxrt::gauge_register("vma.device_usage_mb", [a, heap] {
         VmaBudget b[VK_MAX_MEMORY_HEAPS] = {};
@@ -326,9 +344,11 @@ void register_vma_gauges(VmaAllocator a, VkPhysicalDeviceType type) {
 
 void unregister_vma_gauges() {
     nxrt::memguard_set_discount(nullptr);
+    nxrt::memguard_set_video(nullptr);
     {
         std::lock_guard<std::mutex> lk(g_guard_mu);   // waits for a guard read in flight; later reads see a null allocator
         g_guard_vma = nullptr;
+        g_video_heap = -1;
         g_guard_heap = -1;
     }
     const char* const names[] = {"vma.device_usage_mb", "vma.device_budget_mb", "vma.alloc_count", "vma.alloc_mb", "vma.block_count", "vma.block_mb"};
@@ -792,6 +812,20 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     qci.queueCount = 1 + fg_queues;
     qci.pQueuePriorities = prio;
     VkDeviceCreateInfo dci = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, &en};
+    // Video memory. With VK_EXT_memory_budget the usage and budget of a heap are the driver's figures, not the allocator's estimate.
+    // AMD's driver refuses an allocation that takes this process past the size of a heap (VK_ERROR_OUT_OF_DEVICE_MEMORY) where other
+    // drivers let Windows move video memory to shared memory: slower, but the game goes on. VK_AMD_memory_overallocation_behavior asks
+    // for the same there ([gfx] amd_overallocation = false: the driver's default again).
+    const bool x_budget = has_dext(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
+    if (x_budget) dev_exts.push_back(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
+    VkDeviceMemoryOverallocationCreateInfoAMD overalloc = {VK_STRUCTURE_TYPE_DEVICE_MEMORY_OVERALLOCATION_CREATE_INFO_AMD};
+    const bool x_overalloc = has_dext(VK_AMD_MEMORY_OVERALLOCATION_BEHAVIOR_EXTENSION_NAME) && config_get_bool("gfx", "amd_overallocation", true);
+    if (x_overalloc) {
+        dev_exts.push_back(VK_AMD_MEMORY_OVERALLOCATION_BEHAVIOR_EXTENSION_NAME);
+        overalloc.overallocationBehavior = VK_MEMORY_OVERALLOCATION_BEHAVIOR_ALLOWED_AMD;
+        overalloc.pNext = dci.pNext;
+        dci.pNext = &overalloc;
+    }
     dci.queueCreateInfoCount = 1;
     dci.pQueueCreateInfos = &qci;
     dci.enabledExtensionCount = static_cast<uint32_t>(dev_exts.size());
@@ -810,8 +844,23 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     driver_free_memory = vkFreeMemory;
     vkAllocateMemory = counted_allocate_memory;
     vkFreeMemory = counted_free_memory;
-    NXLOG_I(kTag, "memory limits: maxMemoryAllocationCount %u, minImportedHostPointerAlignment %llu, external host %d",
-            limits_.max_memory_allocation_count, (unsigned long long)limits_.min_imported_host_alignment, features_.external_memory_host);
+    NXLOG_I(kTag, "memory limits: maxMemoryAllocationCount %u, minImportedHostPointerAlignment %llu, external host %d, memory budget %d, overallocation allowed %d",
+            limits_.max_memory_allocation_count, (unsigned long long)limits_.min_imported_host_alignment, features_.external_memory_host, x_budget, x_overalloc);
+    {
+        VkPhysicalDeviceMemoryProperties mp{};
+        vkGetPhysicalDeviceMemoryProperties(physical_, &mp);
+        for (uint32_t i = 0; i < mp.memoryHeapCount; ++i) {
+            std::string types;
+            for (uint32_t t = 0; t < mp.memoryTypeCount; ++t)
+                if (mp.memoryTypes[t].heapIndex == i) {
+                    char tb[24];
+                    std::snprintf(tb, sizeof tb, "%s%u:0x%x", types.empty() ? "" : " ", t, static_cast<unsigned>(mp.memoryTypes[t].propertyFlags));
+                    types += tb;
+                }
+            NXLOG_I(kTag, "memory heap %u: %.2f GiB%s, types (index:flags) %s", i, static_cast<double>(mp.memoryHeaps[i].size) / (1024.0 * 1024.0 * 1024.0),
+                    (mp.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) ? " device-local" : "", types.c_str());
+        }
+    }
     vkGetDeviceQueue(device_, queue_family_, 0, &queue_);
     if (fg_queues) extras::ffx_fg_install(*this, fg_queues);
 
@@ -832,6 +881,8 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     aci.instance = instance_;
     aci.vulkanApiVersion = VK_API_VERSION_1_3;
     aci.pVulkanFunctions = &vf;
+    if (x_budget) aci.flags |= VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT;
+    g_budget_exact = x_budget;
     r = vmaCreateAllocator(&aci, &vma_);
     if (r != VK_SUCCESS) return fail("vmaCreateAllocator failed (" + std::to_string(r) + ")");
     register_vma_gauges(vma_, props_.deviceType);
@@ -1028,13 +1079,17 @@ VkResult Device::create_buffer(VkDeviceSize size, VkBufferUsageFlags usage, Memo
     VmaAllocationCreateInfo ai = {};
     ai.usage = VMA_MEMORY_USAGE_AUTO;
     if (use == MemoryUse::Upload) ai.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    if (use == MemoryUse::Staging) {   // system memory whatever the usage: a load holds gigabytes of these at once, and video memory is for what stays
+        ai.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+        ai.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    }
     if (use == MemoryUse::Readback) ai.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
     VmaAllocationInfo info = {};
     Buffer b;
     VkResult r = vmaCreateBuffer(vma_, &bi, &ai, &b.buffer, &b.allocation, &info);
     if (r != VK_SUCCESS) return r;
     vk_gauge_buffers().add(1);
-    if (use == MemoryUse::Upload || use == MemoryUse::Readback) {      // S34: where host-visible buffers live (device-local host-visible = resizable BAR, else system memory)
+    if (use == MemoryUse::Upload || use == MemoryUse::Staging || use == MemoryUse::Readback) {      // S34: where host-visible buffers live (device-local host-visible = resizable BAR, else system memory)
         static std::atomic<int> logged{0};
         VkMemoryPropertyFlags mp = 0;
         vmaGetAllocationMemoryProperties(vma_, b.allocation, &mp);

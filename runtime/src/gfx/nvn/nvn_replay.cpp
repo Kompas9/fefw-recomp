@@ -3478,6 +3478,10 @@ void do_copy_buffer_texture(const P_CopyBufTex& p, bool to_texture) {
     SubRes s = sub_of(p.view, p.has_view);
     const VkExtent3D ext = tex_extent(t, s.level);
     P_CopyRegion r = p.has_region ? p.region : P_CopyRegion{0, 0, 0, static_cast<int32_t>(ext.width), static_cast<int32_t>(ext.height), static_cast<int32_t>(ext.depth)};
+    if (const uint32_t drop = tex_level_drop(t)) {   // an image stored without its top level: that level has no texels to copy
+        if (s.level < drop) { log_once("copy-dropped-level", "a buffer copy names the level a texture is stored without ([gfx] texture_detail): skipped"); return; }
+        s.level -= drop;
+    }
     const FormatInfo* fi = t->fmt;
     const uint32_t bw = fi ? fi->block_w : 1, bh = fi ? fi->block_h : 1, bpb = fi ? fi->bytes : 4;
     uint32_t rw = static_cast<uint32_t>(r.w), rh = static_cast<uint32_t>(r.h), rd = std::max<int32_t>(1, r.d);
@@ -3519,8 +3523,12 @@ void do_copy_texture_texture(const P_CopyTexTex& p) {
     Texture *s = p.src, *d = p.dst;
     if (!s || !d || !tex_gpu(s) || !tex_gpu(d)) return;
     end_pass();
-    const SubRes ss = sub_of(p.src_view, p.has_src_view), ds = sub_of(p.dst_view, p.has_dst_view);
+    SubRes ss = sub_of(p.src_view, p.has_src_view), ds = sub_of(p.dst_view, p.has_dst_view);
     const VkExtent3D se = tex_extent(s, ss.level), de = tex_extent(d, ds.level);
+    if (ss.level < tex_level_drop(s) || ds.level < tex_level_drop(d)) {   // an image stored without its top level: no texels to copy there
+        log_once("copy-dropped-level-tex", "a texture copy names the level a texture is stored without ([gfx] texture_detail): skipped");
+        return;
+    }
     P_CopyRegion sr = p.has_src_region ? p.src_region : P_CopyRegion{0, 0, 0, static_cast<int32_t>(se.width), static_cast<int32_t>(se.height), static_cast<int32_t>(se.depth)};
     P_CopyRegion dr = p.has_dst_region ? p.dst_region : P_CopyRegion{0, 0, 0, static_cast<int32_t>(de.width), static_cast<int32_t>(de.height), static_cast<int32_t>(de.depth)};
     // scaled images: the NVN regions in image texels (x, y and the size times each image's scale, clipped to the image)
@@ -3537,6 +3545,8 @@ void do_copy_texture_texture(const P_CopyTexTex& p) {
     };
     scale_region(sr, s, ss.level);
     scale_region(dr, d, ds.level);
+    ss.level -= tex_level_drop(s);   // image levels from here on
+    ds.level -= tex_level_drop(d);
     if (sr.w <= 0 || sr.h <= 0 || dr.w <= 0 || dr.h <= 0) return;
     tex_ensure_current(s, *F);
     if (s != d) tex_ensure_current(d, *F);

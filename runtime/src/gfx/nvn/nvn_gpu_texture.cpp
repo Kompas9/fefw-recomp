@@ -64,6 +64,7 @@ struct TexGpu {
     VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;   // tracked layout (the same for every level and layer)
     bool failed = false;                                // no image: the texture is not usable on the GPU (logged once)
     bool transcoded = false;                            // ASTC stored as BC7
+    uint32_t drop = 0;                                  // NVN levels left out at the top ([gfx] texture_detail): image level i is NVN level i + drop
     bool mutable_fmt = false;                           // sRGB and UNORM views of the image are allowed
     bool cube = false;                                  // created with CUBE_COMPATIBLE
     bool depth = false;                                 // depth and/or stencil aspect
@@ -510,6 +511,38 @@ bool create_sparse_texture(Texture* t, TexGpu* g, const Shape& s, std::string* w
 }
 
 
+// ---- texture detail --------------------------------------------------------------------------------------------------------
+// The game's ASTC textures are 8x8 blocks (2 bits per texel); stored as BC7 (8 bits) they take four times the console's memory, about
+// 2.5 GB in the capital. [gfx] texture_detail = half leaves out their largest level: the image starts at the second one, a quarter of the
+// memory (what the console spends). Only mipmapped 2D textures from kDropMinSize texels up (UI and other single-level textures keep every
+// texel). auto (the default): half on a GPU whose video memory heap is under kDropAutoHeap, full otherwise. Read once: images keep their shape.
+constexpr uint32_t kDropMinSize = 512;
+constexpr uint64_t kDropAutoHeap = 9ull << 30;
+bool texture_detail_half() {
+    static const bool half = [] {
+        std::string v = nxrt::config_get_str("gfx", "texture_detail", "auto");
+        std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        VkPhysicalDeviceMemoryProperties mp{};
+        vkGetPhysicalDeviceMemoryProperties(device().physical(), &mp);
+        uint64_t heap = 0;
+        for (uint32_t i = 0; i < mp.memoryHeapCount; ++i)
+            if (mp.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) heap = std::max<uint64_t>(heap, mp.memoryHeaps[i].size);
+        bool h = false;
+        if (v == "half") h = true;
+        else if (v == "full") h = false;
+        else {
+            if (v != "auto") NXLOG_W(kTag, "[gfx] texture_detail '%s' is not auto, full or half: using auto", v.c_str());
+            v = "auto";
+            h = heap != 0 && heap < kDropAutoHeap;
+        }
+        NXLOG_I(kTag, "texture detail: %s ([gfx] texture_detail = %s, video memory heap %.1f GiB)%s", h ? "half" : "full", v.c_str(),
+                static_cast<double>(heap) / (1024.0 * 1024.0 * 1024.0),
+                h ? ": transcoded ASTC textures of 512 texels and more are stored without their largest level" : "");
+        return h;
+    }();
+    return half;
+}
+
 // ---- creation -------------------------------------------------------------------------------------------------------------
 // Makes the image of t (or the failed marker when no format works). Stores the result in t->gpu, which is never null afterwards.
 TexGpu* create_texture_gpu(Texture* t, float want_scale) {
@@ -632,6 +665,14 @@ TexGpu* create_texture_gpu(Texture* t, float want_scale) {
                 NXLOG_I(kTag, "texture %u: %s %ux%u (flags 0x%x, %u levels, %u layers, %u samples) rendered at %ux%u (scale %.3f)", t->id, g->fmt->name, s.base.width,
                         s.base.height, static_cast<unsigned>(t->b.flags), s.levels, s.layers, s.samples, w, h, want_scale);
         }
+    }
+    if (g->transcoded && !t->vpool && s.type == VK_IMAGE_TYPE_2D && s.samples == 1 && s.levels >= 2 &&
+        std::max(s.base.width, s.base.height) >= kDropMinSize && texture_detail_half()) {
+        g->drop = 1;
+        is.base = level_extent(s.base, 1);
+        is.levels = s.levels - 1;
+        g->base = is.base;
+        g->levels = is.levels;
     }
     std::string why2;
     if (device().create_image(make_desc(is, chosen, usage, flags), &g->img, &why2) != VK_SUCCESS)
@@ -1401,8 +1442,10 @@ float tex_scale(Texture* t) {
 
 VkExtent3D tex_image_extent(Texture* t, uint32_t level) {
     TexGpu* g = tex_or_null(t);
-    return g ? level_extent(g->base, level) : tex_extent(t, level);
+    return g ? level_extent(g->base, level > g->drop ? level - g->drop : 0) : tex_extent(t, level);
 }
+
+uint32_t tex_level_drop(Texture* t) { return (t && t->gpu && !t->gpu->failed) ? t->gpu->drop : 0; }
 
 float tex_scale_wanted(Texture* t) {
     TexGpu* g = tex_or_null(t);
@@ -1828,11 +1871,11 @@ void tex_ensure_current(Texture* t, Frame& f) {
     if (!staged) std::memcpy(st.ptr, prep.data.data(), static_cast<size_t>(bytes));
     std::vector<VkBufferImageCopy> regions;
     regions.reserve(prep.level.size());
-    for (uint32_t i = 0; i < prep.level.size(); ++i) {
+    for (uint32_t i = g->drop; i < prep.level.size() && i - g->drop < g->levels; ++i) {   // the levels the image has ([gfx] texture_detail)
         const PreparedLevel& pl = prep.level[i];
         VkBufferImageCopy r = {};
         r.bufferOffset = st.offset + pl.offset;
-        r.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, i, 0, g->layers};
+        r.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, i - g->drop, 0, g->layers};
         r.imageExtent = {pl.width, pl.height, pl.depth};
         regions.push_back(r);
     }
@@ -1898,9 +1941,16 @@ VkImageView tex_sampled_view(Texture* t, const ViewRequest& req) {
     if (!g) return VK_NULL_HANDLE;
     const bool is3d = g->type == VK_IMAGE_TYPE_3D;
     const uint32_t total_layers = is3d ? g->base.depth : g->layers;   // 3D images: the slices are the layers of 2D views
-    const uint32_t bl = req.base_level;
+    // NVN levels to image levels: an image stored without its top level ([gfx] texture_detail) answers a view that starts there from
+    // its own first level, with as many levels as are left of the range
+    uint32_t bl = req.base_level, want_nl = req.level_count;
+    if (g->drop) {
+        const uint32_t end = want_nl ? bl + want_nl : 0;          // NVN level past the range (0: to the last one)
+        bl = bl > g->drop ? bl - g->drop : 0;
+        if (want_nl) want_nl = end > g->drop + bl ? end - g->drop - bl : 1;
+    }
     if (bl >= g->levels) return bad_view(*t, "base level out of range");
-    const uint32_t nl = req.level_count ? req.level_count : g->levels - bl;
+    const uint32_t nl = want_nl ? want_nl : g->levels - bl;
     if (nl == 0 || bl + nl > g->levels) return bad_view(*t, "level range out of range");
     const uint32_t bly = req.base_layer;
     uint32_t nly = 1;

@@ -44,6 +44,7 @@ std::thread g_thread;         // guarded by g_ctl
 std::atomic<uint64_t> g_peak{0};
 std::atomic<bool> g_tripped{false};
 std::atomic<uint64_t (*)()> g_discount{nullptr};
+std::atomic<void (*)(MemGuardVideo*)> g_video{nullptr};
 
 constexpr double kBytesPerGb = 1073741824.0;
 
@@ -134,6 +135,26 @@ void write_limit_report(uint64_t footprint, uint64_t limit) {
     std::fflush(stderr);
 }
 
+// What the machine has left, next to the footprint line: a game that runs out of video memory or of system commit fails in the
+// driver, far from the cause, and the log is then the only place that shows it.
+void log_system_memory() {
+    MEMORYSTATUSEX ms{};
+    ms.dwLength = sizeof ms;
+    if (!GlobalMemoryStatusEx(&ms)) return;
+    char video[192] = "";
+    if (auto fn = g_video.load()) {
+        MemGuardVideo v;
+        fn(&v);
+        if (v.heap)
+            std::snprintf(video, sizeof video, "; video memory: %.2f GB in use of a %.2f GB budget (%s, heap %.1f GB), driver allocations %.2f GB",
+                          static_cast<double>(v.usage) / kBytesPerGb, static_cast<double>(v.budget) / kBytesPerGb, v.exact ? "driver figures" : "estimates",
+                          static_cast<double>(v.heap) / kBytesPerGb, static_cast<double>(v.driver_bytes) / kBytesPerGb);
+    }
+    NXLOG_I("memory", "system: RAM %.1f GB free of %.1f GB, commit %.1f GB free of %.1f GB%s", static_cast<double>(ms.ullAvailPhys) / kBytesPerGb,
+            static_cast<double>(ms.ullTotalPhys) / kBytesPerGb, static_cast<double>(ms.ullAvailPageFile) / kBytesPerGb,
+            static_cast<double>(ms.ullTotalPageFile) / kBytesPerGb, video);
+}
+
 void guard_loop(Settings s) {
     const double limit_gb = static_cast<double>(s.limit) / kBytesPerGb;
     auto next_log = Clock::now() + std::chrono::seconds(30);
@@ -152,6 +173,7 @@ void guard_loop(Settings s) {
             next_log = Clock::now() + std::chrono::seconds(30);
             NXLOG_I("memory", "footprint %.2f GB (peak %.2f GB, limit %.1f GB)", gb,
                     static_cast<double>(g_peak.load()) / kBytesPerGb, limit_gb);
+            log_system_memory();
         }
 
         if (!warned && f > s.limit / 4 * 3) {
@@ -185,6 +207,7 @@ uint64_t memguard_footprint() {
 }
 
 void memguard_set_discount(uint64_t (*gpu_bytes)()) { g_discount.store(gpu_bytes); }
+void memguard_set_video(void (*fn)(MemGuardVideo*)) { g_video.store(fn); }
 
 uint64_t memguard_footprint_host() {
     const uint64_t f = memguard_footprint();
