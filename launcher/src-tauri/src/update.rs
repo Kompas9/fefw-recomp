@@ -71,6 +71,9 @@ pub fn parse_version(s: &str) -> Option<(u64, u64, u64)> {
 }
 
 fn system_tool(name: &str) -> PathBuf {
+    if !cfg!(windows) {
+        return PathBuf::from(name.trim_end_matches(".exe")); // curl and tar from PATH
+    }
     let root = std::env::var_os("SystemRoot").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
     let p = root.join("System32").join(name);
     if p.is_file() { p } else { PathBuf::from(name) }

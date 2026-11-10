@@ -37,6 +37,9 @@ struct Config {
     minimize_on_play: bool,
     /// do not ask GitHub for a newer release when the launcher starts
     skip_update_check: bool,
+    /// Linux: the command that starts fefw.exe (Wine or Proton, e.g. `umu-run` or `wine`). Empty: umu-run if
+    /// it is installed, else wine. Unused on Windows.
+    runner: String,
     /// The launcher's own interface language ("en", "zh", or the code of a language pack in locales/). Empty: English.
     lang: String,
 }
@@ -52,6 +55,11 @@ fn load_config(app: &AppHandle) -> Config {
 }
 
 fn exe_dir() -> PathBuf {
+    // an AppImage runs from a temporary mount: the package is the folder the .AppImage file is in
+    #[cfg(target_os = "linux")]
+    if let Some(d) = std::env::var_os("APPIMAGE").map(PathBuf::from).and_then(|p| p.parent().map(|d| d.to_path_buf())) {
+        return d;
+    }
     std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())).unwrap_or_else(|| PathBuf::from("."))
 }
 
@@ -417,7 +425,7 @@ fn play(app: AppHandle, state: State<Arc<setup::Shared>>) -> Result<(), String> 
         return Err("Setup is not finished: open Setup and press Set up.".into());
     }
     settings::ensure_play_paths(&p.game_dir, &p)?;
-    play::start(&app, &p.exe(), &p.game_dir, cfg.minimize_on_play)
+    play::start(&app, &p.exe(), &p.game_dir, cfg.minimize_on_play, &cfg.runner)
 }
 
 #[tauri::command]
@@ -494,6 +502,10 @@ fn start_update(
     if package_tools().is_none() {
         return Err("Updates are for the release package. In a checkout, use git.".into());
     }
+    if !cfg!(windows) {
+        // the release zip is the Windows package (fefw-launcher.exe, python.exe, zig.exe): installing it here would break the install
+        return Err("Updating from the launcher is Windows-only for now. Download the new release and extract it over this folder.".into());
+    }
     if setup_state.progress.lock().unwrap().state == "running" {
         return Err("Setup is running. Wait for it or pause it first.".into());
     }
@@ -536,7 +548,10 @@ fn cancel_update(state: State<Arc<update::Shared>>) {
 /// Starts the (new) launcher from the install folder and closes this one.
 #[tauri::command]
 fn restart_launcher(app: AppHandle) -> Result<(), String> {
-    let exe = exe_dir().join("fefw-launcher.exe");
+    let exe = match std::env::var_os("APPIMAGE") {
+        Some(a) if !cfg!(windows) => PathBuf::from(a),
+        _ => exe_dir().join(if cfg!(windows) { "fefw-launcher.exe" } else { "fefw-launcher" }),
+    };
     std::process::Command::new(&exe).current_dir(exe_dir()).spawn().map_err(|e| format!("cannot start {}: {e}", exe.display()))?;
     app.exit(0);
     Ok(())

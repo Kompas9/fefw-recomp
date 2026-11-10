@@ -97,13 +97,13 @@ pub fn apply(dir: &Path, edits: &[Edit]) -> Result<(), String> {
 /// cache are. With no dlc/ in the dump, [aoc] dir is empty: no add-on content.
 fn owned(p: &Paths) -> Vec<(&'static str, &'static str, String)> {
     vec![
-        ("fs", "exefs", crate::dump::fwd(&p.plain_exefs())),
+        ("fs", "exefs", crate::dump::game_path(&p.plain_exefs())),
         ("fs", "main", String::new()),
-        ("fs", "romfs", crate::dump::fwd(&p.romfs)),
-        ("fs", "mods", crate::dump::fwd(&p.mods())),
-        ("aoc", "dir", p.dlc.as_deref().map(crate::dump::fwd).unwrap_or_default()),
-        ("nvn", "shader_cache", crate::dump::fwd(&p.spirv())),
-        ("nvn", "bc7_cache", crate::dump::fwd(&p.bc7())),
+        ("fs", "romfs", crate::dump::game_path(&p.romfs)),
+        ("fs", "mods", crate::dump::game_path(&p.mods())),
+        ("aoc", "dir", p.dlc.as_deref().map(crate::dump::game_path).unwrap_or_default()),
+        ("nvn", "shader_cache", crate::dump::game_path(&p.spirv())),
+        ("nvn", "bc7_cache", crate::dump::game_path(&p.bc7())),
     ]
 }
 

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Starts fefw.exe in the run folder, watches it, and reports how it ended.
+//! Starts fefw.exe in the run folder, watches it, and reports how it ended. On Linux fefw.exe (a Windows program) runs through a
+//! runner: the launcher's `runner` setting, else umu-run (Proton outside Steam), else wine.
 
 use serde::Serialize;
 use std::path::Path;
@@ -53,24 +54,60 @@ fn report_files(dir: &Path, started: SystemTime) -> Vec<ReportFile> {
         .collect()
 }
 
-pub fn start(app: &AppHandle, exe: &Path, game_dir: &Path, minimize: bool) -> Result<(), String> {
+/// The command that starts fefw.exe: the program and its arguments before the exe. On Windows nothing (the exe itself). On Linux
+/// `custom` (the runner setting, split on spaces, e.g. `umu-run` or `wine`), else umu-run, else wine.
+pub fn runner(custom: &str) -> Result<Vec<String>, String> {
+    if cfg!(windows) {
+        return Ok(vec![]);
+    }
+    let words: Vec<String> = custom.split_whitespace().map(String::from).collect();
+    if !words.is_empty() {
+        return Ok(words);
+    }
+    for r in ["umu-run", "wine"] {
+        if on_path(r) {
+            return Ok(vec![r.to_string()]);
+        }
+    }
+    Err("fefw.exe is a Windows program: on Linux it runs through Proton or Wine. Install umu-launcher (umu-run, which uses Proton) or \
+         Wine, or set the runner in Settings."
+        .into())
+}
+
+fn on_path(name: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(name).is_file()))
+}
+
+pub fn start(app: &AppHandle, exe: &Path, game_dir: &Path, minimize: bool, runner_setting: &str) -> Result<(), String> {
     if app.state::<PlayState>().0.lock().unwrap().state == "running" {
         return Err("The game is already running.".into());
     }
     if !exe.is_file() {
         return Err(format!("fefw.exe was not found at {}. Run Set up first.", crate::dump::fwd(exe)));
     }
+    let runner = runner(runner_setting)?;
     let app2 = app.clone();
     let dir = game_dir.to_path_buf();
     let exe = exe.to_path_buf();
     set_status(app, Status { state: "running".into(), message: "Starting fefw.exe...".into(), ..Default::default() });
     std::thread::spawn(move || {
-        let mut cmd = Command::new(&exe);
+        let mut cmd = match runner.split_first() {
+            None => Command::new(&exe),
+            Some((prog, args)) => {
+                let mut c = Command::new(prog);
+                c.args(args).arg(&exe);
+                // umu-run wants a game id (it picks protonfixes for known games from it); "0" is the generic one its README uses
+                if prog.ends_with("umu-run") && std::env::var_os("GAMEID").is_none() {
+                    c.env("GAMEID", "0");
+                }
+                c
+            }
+        };
         // fefw.exe reads fefw.ini from its working directory: every path comes from there
         cmd.current_dir(&dir);
         // the upscaler DLLs ship next to the launcher (upscalers/fsr, upscalers/streamline), which need not be the run folder
         if let Some(d) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
-            cmd.env("NXRT_LAUNCHER_DIR", d);
+            cmd.env("NXRT_LAUNCHER_DIR", crate::dump::game_path(&d));
         }
         #[cfg(windows)]
         {
@@ -81,7 +118,8 @@ pub fn start(app: &AppHandle, exe: &Path, game_dir: &Path, minimize: bool) -> Re
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
-                set_status(&app2, Status { state: "exited".into(), crashed: true, message: format!("Could not start fefw.exe: {e}"), ..Default::default() });
+                let what = if runner.is_empty() { String::new() } else { format!(" ({})", runner.join(" ")) };
+                set_status(&app2, Status { state: "exited".into(), crashed: true, message: format!("Could not start fefw.exe: {e}{what}"), ..Default::default() });
                 return;
             }
         };
@@ -117,5 +155,19 @@ pub fn start(app: &AppHandle, exe: &Path, game_dir: &Path, minimize: bool) -> Re
 }
 
 pub fn open_with_shell(path: &Path) -> Result<(), String> {
-    Command::new("explorer.exe").arg(path).spawn().map(|_| ()).map_err(|e| format!("Could not open {}: {}", path.display(), e))
+    Command::new(if cfg!(windows) { "explorer.exe" } else { "xdg-open" }).arg(path).spawn().map(|_| ()).map_err(|e| format!("Could not open {}: {}", path.display(), e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_runner_setting_is_split_into_words() {
+        if cfg!(windows) {
+            assert!(runner("wine").unwrap().is_empty());
+        } else {
+            assert_eq!(runner("  env WINEPREFIX=/p  wine ").unwrap(), ["env", "WINEPREFIX=/p", "wine"]);
+        }
+    }
 }

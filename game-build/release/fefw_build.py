@@ -37,7 +37,9 @@ from concurrent.futures import ThreadPoolExecutor, FIRST_COMPLETED, wait
 HERE = os.path.dirname(os.path.abspath(__file__))
 RECOMP = os.path.join(HERE, 'recomp')
 SDK = os.path.join(HERE, 'sdk')
-ZIG = os.path.join(HERE, 'zig', 'zig.exe')
+WINDOWS = os.name == 'nt'
+# the same Windows target from either host: on Linux the launcher starts fefw.exe through Wine/Proton
+ZIG = os.path.join(HERE, 'zig', 'zig.exe' if WINDOWS else 'zig')
 FORMAT = 2          # bump when the build layout or the stamp changes: older builds (partial or done) are then started over
 # the lifter as game-build/scripts/make-release.ps1 ships it: paths under RECOMP, the same in the zip (tools/build/recomp/...)
 # and in the repo (recomp/...)
@@ -207,8 +209,9 @@ def write_exefs(exefs, out):
 
 
 def popen(cmd, **kw):
-    return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                            creationflags=CREATE_NO_WINDOW | BELOW_NORMAL, **kw)
+    if WINDOWS:
+        kw['creationflags'] = CREATE_NO_WINDOW | BELOW_NORMAL
+    return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, **kw)
 
 
 class Runner:
@@ -282,7 +285,16 @@ def lift(runner, exefs, gen, jobs):
 
 
 def free_memory():
-    """Available physical memory in bytes (Windows), or None."""
+    """Available physical memory in bytes, or None."""
+    if not WINDOWS:
+        try:
+            with open('/proc/meminfo') as f:
+                for line in f:
+                    if line.startswith('MemAvailable:'):
+                        return int(line.split()[1]) * 1024
+        except (OSError, ValueError, IndexError):
+            pass
+        return None
     try:
         import ctypes
 
@@ -427,6 +439,11 @@ def main():
         return 0 if current else 3
     if not a.exefs or not a.game:
         ap.error('--exefs and --game are required')
+    if not WINDOWS:
+        try:
+            os.nice(10)                  # the BELOW_NORMAL of the Windows build: the lifter and the compilers inherit it
+        except OSError:
+            pass
     game = os.path.abspath(a.game)
     build = os.path.join(game, 'build')
     os.makedirs(build, exist_ok=True)

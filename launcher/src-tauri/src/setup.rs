@@ -62,7 +62,7 @@ impl Paths {
     }
     pub fn python(&self) -> PathBuf {
         match &self.package {
-            Some(t) => t.join("python").join("python.exe"),
+            Some(t) => package_python(t),
             None => self.repo.join("tools").join(".venv").join("Scripts").join("python.exe"),
         }
     }
@@ -87,7 +87,7 @@ impl Paths {
     }
     pub fn harness(&self) -> PathBuf {
         match &self.package {
-            Some(t) => t.join("spirv_harness").join("spirv_harness.exe"),
+            Some(t) => t.join("spirv_harness").join(if cfg!(windows) { "spirv_harness.exe" } else { "spirv_harness" }),
             None => self.repo.join("tools").join("shaders").join("build").join("bin").join("Release").join("net10.0").join("spirv_harness.dll"),
         }
     }
@@ -150,6 +150,20 @@ fn package_build_ok(p: &Paths) -> bool {
     let ok = cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().map(|s| s.success()).unwrap_or(false);
     *BUILD_CHECK.lock().unwrap() = Some((key, ok));
     ok
+}
+
+/// The release package's Python: tools/python/python.exe (the embeddable package) on Windows. On Linux tools/python/bin/python3
+/// (a relocatable build) when the package has one, else the system's python3, which then needs the lifter's packages (zbic, lz4,
+/// capstone, zstandard) installed.
+fn package_python(tools: &Path) -> PathBuf {
+    if cfg!(windows) {
+        return tools.join("python").join("python.exe");
+    }
+    let bundled = tools.join("python").join("bin").join("python3");
+    if bundled.is_file() {
+        return bundled;
+    }
+    which("python3").unwrap_or(bundled)
 }
 
 pub fn exe_path(repo: &Path) -> PathBuf {
@@ -282,6 +296,12 @@ pub(crate) fn quiet(cmd: &mut Command) {
         // CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS (the compilers it starts inherit it)
         cmd.creation_flags(0x0800_0000 | 0x0000_4000);
     }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // its own process group, so kill_tree ends everything it starts (the lifter's workers, the compilers)
+        cmd.process_group(0);
+    }
 }
 
 /// Ends a process and everything it started (cmake, ninja, the compilers, the lifter's workers).
@@ -289,10 +309,18 @@ pub fn kill_tree(pid: u32) {
     if pid == 0 {
         return;
     }
-    let mut cmd = Command::new("taskkill");
-    cmd.args(["/T", "/F", "/PID", &pid.to_string()]);
-    quiet(&mut cmd);
-    let _ = cmd.stdout(Stdio::null()).stderr(Stdio::null()).status();
+    #[cfg(windows)]
+    {
+        let mut cmd = Command::new("taskkill");
+        cmd.args(["/T", "/F", "/PID", &pid.to_string()]);
+        quiet(&mut cmd);
+        let _ = cmd.stdout(Stdio::null()).stderr(Stdio::null()).status();
+    }
+    #[cfg(unix)]
+    {
+        // quiet() made the process a group leader: a negative pid signals the whole group
+        let _ = Command::new("kill").args(["-KILL", "--", &format!("-{pid}")]).stdout(Stdio::null()).stderr(Stdio::null()).status();
+    }
 }
 
 /// ninja's "[12/345] ..." prefix.

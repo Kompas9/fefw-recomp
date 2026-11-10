@@ -307,6 +307,9 @@ export const en = {
     'settings.jobs.label': 'Build processes',
     'settings.jobs.hint': '0: one fewer than your CPU threads. Lower it if the PC runs out of memory while building.',
     'settings.minimizeOnPlay.label': 'Minimise while the game runs',
+    'settings.runner.label': 'Runner (Wine / Proton)',
+    'settings.runner.placeholder': 'umu-run if installed, else wine',
+    'settings.runner.hint': 'The command that starts fefw.exe on Linux, for example umu-run (Proton) or wine. The path to fefw.exe is added after it.',
 
     // ----- about -----
     'about.launcherWord': 'launcher',
