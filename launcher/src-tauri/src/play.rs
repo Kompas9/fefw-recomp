@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Starts fefw.exe in the run folder, watches it, and reports how it ended. On Linux fefw.exe (a Windows program) runs through a
-//! runner: the launcher's `runner` setting, else umu-run (Proton outside Steam), else wine.
+//! runner: the launcher's `runner` setting, else Steam's own Proton, else umu-run, else wine.
 
 use serde::Serialize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
@@ -56,7 +56,7 @@ fn report_files(dir: &Path, started: SystemTime) -> Vec<ReportFile> {
 
 /// The command that starts fefw.exe: the program and its arguments before the exe. On Windows nothing (the exe itself). On Linux
 /// `custom` (the runner setting, split into words like a shell does, so `"/path/Proton - Experimental/proton" run` works), else
-/// umu-run, else wine.
+/// Steam's Proton (in the Steam Linux Runtime, as Steam starts a game), else umu-run, else wine.
 pub fn runner(custom: &str) -> Result<Vec<String>, String> {
     if cfg!(windows) {
         return Ok(vec![]);
@@ -65,14 +65,99 @@ pub fn runner(custom: &str) -> Result<Vec<String>, String> {
     if !words.is_empty() {
         return Ok(words);
     }
+    if let Some(w) = steam_proton() {
+        return Ok(w);
+    }
     for r in ["umu-run", "wine"] {
         if on_path(r) {
             return Ok(vec![r.to_string()]);
         }
     }
-    Err("fefw.exe is a Windows program: on Linux it runs through Proton or Wine. Install umu-launcher (umu-run, which uses Proton) or \
+    Err("fefw.exe is a Windows program: on Linux it runs through Proton or Wine. Install Steam and its Proton (Library, Tools, Proton Experimental), umu-launcher (umu-run) or \
          Wine, or set the runner in Settings."
         .into())
+}
+
+/// The values of `"key" "value"` lines in a Valve KeyValues file (libraryfolders.vdf, toolmanifest.vdf, appmanifest_*.acf).
+fn vdf_values(text: &str, key: &str) -> Vec<String> {
+    let quoted = format!("\"{key}\"");
+    text.lines()
+        .filter_map(|l| l.trim().strip_prefix(quoted.as_str()))
+        .filter_map(|rest| rest.trim().strip_prefix('"').and_then(|v| v.strip_suffix('"')))
+        .map(|v| v.replace("\\\\", "\\"))
+        .collect()
+}
+
+/// (Steam root, its library folders) from libraryfolders.vdf. None without Steam.
+fn steam_libraries() -> Option<(PathBuf, Vec<PathBuf>)> {
+    let home = PathBuf::from(std::env::var_os("HOME")?);
+    for r in [".local/share/Steam", ".steam/steam", ".steam/root", ".var/app/com.valvesoftware.Steam/.local/share/Steam"] {
+        let Ok(root) = std::fs::canonicalize(home.join(r)) else { continue };
+        let Ok(text) = std::fs::read_to_string(root.join("steamapps/libraryfolders.vdf")) else { continue };
+        let mut libs: Vec<PathBuf> = Vec::new();
+        for lib in std::iter::once(root.clone()).chain(vdf_values(&text, "path").into_iter().map(PathBuf::from)) {
+            let Ok(lib) = std::fs::canonicalize(lib) else { continue };
+            if lib.join("steamapps").is_dir() && !libs.contains(&lib) {
+                libs.push(lib);
+            }
+        }
+        return Some((root, libs));
+    }
+    None
+}
+
+/// Proton Experimental, else the newest "Proton N.N" Steam installed. `PROTON_DIR` (a folder with `proton`) overrides it.
+fn pick_proton(libs: &[PathBuf]) -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("PROTON_DIR").map(PathBuf::from) {
+        return p.join("proton").is_file().then_some(p);
+    }
+    let rank = |name: &str| -> (u8, Vec<u32>) {
+        if name.contains("Experimental") {
+            return (2, vec![]);
+        }
+        let nums: Vec<u32> = name.split(|c: char| !c.is_ascii_digit()).filter_map(|x| x.parse().ok()).collect();
+        (u8::from(!nums.is_empty()), nums)
+    };
+    let mut found: Vec<(String, PathBuf)> = Vec::new();
+    for lib in libs {
+        let Ok(rd) = std::fs::read_dir(lib.join("steamapps/common")) else { continue };
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with("Proton") && e.path().join("proton").is_file() {
+                found.push((name, e.path()));
+            }
+        }
+    }
+    found.into_iter().max_by_key(|(n, _)| rank(n)).map(|(_, p)| p)
+}
+
+/// Steam's Proton as runner words: the Steam Linux Runtime's entry point around it when its toolmanifest.vdf asks for one (as Steam
+/// starts a game), and STEAM_COMPAT_* set. The prefix is ~/.local/share/fefw-recomp/proton.
+fn steam_proton() -> Option<Vec<String>> {
+    let (root, libs) = steam_libraries()?;
+    let pdir = pick_proton(&libs)?;
+    let s = |p: &Path| p.to_string_lossy().into_owned();
+    let data = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))?
+        .join("fefw-recomp/proton");
+    std::fs::create_dir_all(&data).ok()?;
+    let mut w = vec![format!("STEAM_COMPAT_DATA_PATH={}", s(&data)), format!("STEAM_COMPAT_CLIENT_INSTALL_PATH={}", s(&root))];
+    let manifest = std::fs::read_to_string(pdir.join("toolmanifest.vdf")).unwrap_or_default();
+    if let Some(appid) = vdf_values(&manifest, "require_tool_appid").first() {
+        for lib in &libs {
+            let acf = std::fs::read_to_string(lib.join(format!("steamapps/appmanifest_{appid}.acf"))).unwrap_or_default();
+            let Some(dir) = vdf_values(&acf, "installdir").into_iter().next() else { continue };
+            let entry = lib.join("steamapps/common").join(&dir).join("_v2-entry-point");
+            if entry.is_file() {
+                w.extend([s(&entry), "--verb=waitforexitandrun".into(), "--".into()]);
+                break;
+            }
+        }
+    }
+    w.extend([s(&pdir.join("proton")), "waitforexitandrun".into()]);
+    Some(w)
 }
 
 /// Shell-like words: spaces separate them, "..." and '...' group them, a backslash outside quotes takes the next character as is
@@ -245,6 +330,9 @@ mod tests {
             assert!(is_umu(&words("PROTONPATH=/p umu-run")));
             assert_eq!(words(r#""C:\games" "a\"b""#), [r"C:\games", r#"a"b"#]);
             assert!(!is_umu(&words("wine")));
+            let vdf = "\"path\"\t\t\"/mnt/a b\"\n  \"require_tool_appid\" \"1628350\"\n";
+            assert_eq!(vdf_values(vdf, "path"), ["/mnt/a b"]);
+            assert_eq!(vdf_values(vdf, "require_tool_appid"), ["1628350"]);
         }
     }
 }
