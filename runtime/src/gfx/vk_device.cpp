@@ -617,6 +617,8 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     VkPhysicalDevicePresentIdFeaturesKHR apid = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR};
     VkPhysicalDeviceAntiLagFeaturesAMD aal = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ANTI_LAG_FEATURES_AMD};
     VkPhysicalDevicePipelineRobustnessFeaturesEXT aprb = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_ROBUSTNESS_FEATURES_EXT};
+    VkPhysicalDeviceMemoryPriorityFeaturesEXT ampri = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PRIORITY_FEATURES_EXT};
+    VkPhysicalDevicePageableDeviceLocalMemoryFeaturesEXT apage = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PAGEABLE_DEVICE_LOCAL_MEMORY_FEATURES_EXT};
     std::vector<const char*> dev_exts;
     void* chain = nullptr;
     auto add_ext = [&](const char* name, void* feat_struct) {
@@ -649,6 +651,16 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     const bool x_ll2 = x_pid && has_dext(VK_NV_LOW_LATENCY_2_EXTENSION_NAME);
     if (x_ll2) dev_exts.push_back(VK_NV_LOW_LATENCY_2_EXTENSION_NAME);
     const bool x_aal = !headless && add_ext(VK_AMD_ANTI_LAG_EXTENSION_NAME, &aal);
+    // the OS's video memory budget and this process' usage per heap, which vmaGetHeapBudgets (the vma.device_* gauges, the memory guard)
+    // reads: without the extension VMA only estimates them (80% of the heap as the budget, its own blocks as the usage)
+    const bool x_membudget = has_dext(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
+    if (x_membudget) dev_exts.push_back(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
+    // Over the budget, the OS may move this process' device-local allocations to host memory instead of the driver refusing new ones
+    // (VK_EXT_pageable_device_local_memory), and the priority of an allocation says which stay (VK_EXT_memory_priority; create_image and
+    // create_buffer set it). [gfx] pageable_memory = false: neither is enabled.
+    const bool want_pageable = config_get_bool("gfx", "pageable_memory", true);
+    const bool x_mpri = want_pageable && add_ext(VK_EXT_MEMORY_PRIORITY_EXTENSION_NAME, &ampri);
+    const bool x_page = x_mpri && add_ext(VK_EXT_PAGEABLE_DEVICE_LOCAL_MEMORY_EXTENSION_NAME, &apage);
     features_.external_memory_host = has_dext(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
     if (features_.external_memory_host) dev_exts.push_back(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
     if (has_dext(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME)) { dev_exts.push_back(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME); features_.push_descriptor = true; }
@@ -828,6 +840,12 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     aci.instance = instance_;
     aci.vulkanApiVersion = VK_API_VERSION_1_3;
     aci.pVulkanFunctions = &vf;
+    if (x_membudget) aci.flags |= VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT;
+    const bool mem_priority = x_mpri && ampri.memoryPriority;
+    if (mem_priority) aci.flags |= VMA_ALLOCATOR_CREATE_EXT_MEMORY_PRIORITY_BIT;
+    NXLOG_I(kTag, "video memory over the budget: memory priority %d, pageable device-local memory %d ([gfx] pageable_memory = %d)",
+            mem_priority, x_page && apage.pageableDeviceLocalMemory, want_pageable);
+    NXLOG_I(kTag, "video memory budget: %s", x_membudget ? "from the OS (VK_EXT_memory_budget)" : "estimated (no VK_EXT_memory_budget)");
     r = vmaCreateAllocator(&aci, &vma_);
     if (r != VK_SUCCESS) return fail("vmaCreateAllocator failed (" + std::to_string(r) + ")");
     register_vma_gauges(vma_, props_.deviceType);
@@ -964,6 +982,9 @@ VkResult Device::create_image(const ImageDesc& d, Image* out, std::string* why) 
     ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     VmaAllocationCreateInfo ai = {};
     ai.usage = VMA_MEMORY_USAGE_AUTO;
+    // VK_EXT_memory_priority (used for a dedicated allocation; ignored without the extension): what is rendered to stays in video memory
+    // before what is only sampled. Zero, the default, would make every large image the first to go.
+    ai.priority = (d.usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) ? 1.0f : 0.5f;
     Image img;
     VkImage handle = VK_NULL_HANDLE;
     VmaAllocation alloc = nullptr;
@@ -1023,6 +1044,7 @@ VkResult Device::create_buffer(VkDeviceSize size, VkBufferUsageFlags usage, Memo
     bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     VmaAllocationCreateInfo ai = {};
     ai.usage = VMA_MEMORY_USAGE_AUTO;
+    ai.priority = 1.0f;   // VK_EXT_memory_priority, a dedicated allocation: buffers are what draws read (pool copies among them), and small next to the images
     if (use == MemoryUse::Upload) ai.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
     if (use == MemoryUse::Readback) ai.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
     VmaAllocationInfo info = {};
