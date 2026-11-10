@@ -237,8 +237,8 @@ void row(Menu& m, const char* label, When when, const char* help) {
     ImGui::TextUnformatted(tr(label));
     if (when == When::Restart) {
         ImGui::SameLine();
-        ImGui::TextColored(kRestartTag, tr(tr("restart")));
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip(tr(tr("Applies on restart: the game reads this once, when it starts.")));
+        ImGui::TextColored(kRestartTag, tr("restart"));
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip(tr("Applies on restart: the game reads this once, when it starts."));
     }
     ImGui::TableSetColumnIndex(1);
     ImGui::SetNextItemWidth(-FLT_MIN);
@@ -253,20 +253,21 @@ void row(Menu& m, const char* label, When when, const char* help) {
 // Under a restart-only control: what runs until the restart.
 void pending_note(bool pending, const std::string& running) {
     if (!pending) return;
-    ImGui::TextColored(kOrange, tr(tr("Applies on restart (running: %s)")), running.empty() ? tr("default") : running.c_str());
+    ImGui::TextColored(kOrange, tr("Applies on restart (running: %s)"), running.empty() ? tr("default") : running.c_str());
 }
 
 // A value row that is set by an environment variable: shown, locked.
 bool env_locked(const IniKey& k) {
     if (!ini_env(k)) return false;
-    ImGui::TextDisabled(tr(tr("%s (set by %s)")), ini_now(k).c_str(), config_env_name(k.sec, k.key).c_str());
+    ImGui::TextDisabled(tr("%s (set by %s)"), ini_now(k).c_str(), config_env_name(k.sec, k.key).c_str());
     return true;
 }
 
 // A list. *idx may be -1 (a value no entry holds): `other` is shown then. Left / right step through the entries.
-bool combo(Menu& m, const char* id, int* idx, const char* const* names, int n, const char* other = "Custom") {  // tr() at the sites
+bool combo(Menu& m, const char* id, int* idx, const char* const* names, int n, const char* other = "Custom",
+           bool other_is_text = false) {  // tr() at the sites
     bool changed = false;
-    const char* preview = *idx >= 0 && *idx < n ? tr(names[*idx]) : tr(other);
+    const char* preview = *idx >= 0 && *idx < n ? tr(names[*idx]) : other_is_text ? other : tr(other);
     if (ImGui::BeginCombo(id, preview, ImGuiComboFlags_HeightLarge)) {
         for (int i = 0; i < n; ++i) {
             const bool sel = i == *idx;
@@ -540,8 +541,8 @@ void resolution_group(Menu& m) {
                 int idx = -1;
                 for (int i = 0; i < kOutputCount; ++i)
                     if (cur == std::string(kOutputVals[i])) idx = i;
-                const std::string other = "Custom: " + ini_now(out);
-                if (combo(m, "##out", &idx, kOutputNames, kOutputCount, other.c_str())) ini_put(m, out, kOutputVals[idx]);
+                const std::string other = std::string(tr("Custom")) + ": " + ini_now(out);
+                if (combo(m, "##out", &idx, kOutputNames, kOutputCount, other.c_str(), true)) ini_put(m, out, kOutputVals[idx]);
                 pending_note(ini_pending(m, out), ini_boot(m, out));
             }
         }
@@ -1266,6 +1267,7 @@ void settings_menu(play::UiHost& host, gfx::Overlay& ov) {
         for (const IniKey& k : kIni) ini_boot(m, k);
         m.loaded = true;
     }
+
     const int frame = ImGui::GetFrameCount();
     const bool opened = frame != m.last_frame + 1;
     m.last_frame = frame;
