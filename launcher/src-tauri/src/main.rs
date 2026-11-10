@@ -11,6 +11,7 @@ mod nup;
 mod play;
 mod settings;
 mod setup;
+mod steam;
 mod update;
 
 use serde::{Deserialize, Serialize};
@@ -428,6 +429,45 @@ fn play(app: AppHandle, state: State<Arc<setup::Shared>>) -> Result<(), String> 
     play::start(&app, &p.exe(), &p.game_dir, cfg.minimize_on_play, &cfg.runner)
 }
 
+/// Linux: whether Steam is installed and the shortcut to fefw.exe exists.
+#[tauri::command]
+fn steam_status(app: AppHandle) -> steam::State {
+    let cfg = load_config(&app);
+    match paths(&cfg) {
+        Ok(p) => steam::state(&p.exe()),
+        Err(_) => steam::State { available: false, running: false, added: false },
+    }
+}
+
+/// Linux: adds fefw.exe to Steam as a non-Steam game. Steam has to be closed for that: when it runs, the player is asked first.
+#[tauri::command]
+async fn add_to_steam(app: AppHandle) -> Result<String, String> {
+    use tauri_plugin_dialog::{MessageDialogButtons, MessageDialogKind};
+    let cfg = load_config(&app);
+    let p = paths(&cfg)?;
+    let exe = p.exe();
+    if !exe.is_file() {
+        return Err("fefw.exe is not built yet. Run Set up first.".into());
+    }
+    let close = if steam::state(&exe).running {
+        app.dialog()
+            .message("Steam saves its game list when it closes, so it has to close while the launcher adds the game. It is started again right after.")
+            .title("Add to Steam")
+            .kind(MessageDialogKind::Info)
+            .buttons(MessageDialogButtons::OkCancelCustom("Close Steam and add".into(), "Cancel".into()))
+            .blocking_show()
+    } else {
+        false
+    };
+    if steam::state(&exe).running && !close {
+        return Err("Not added: Steam is still running.".into());
+    }
+    // the upscaler DLLs next to the launcher: fefw.exe finds them by itself when the run folder is the install folder
+    let launch = if p.game_dir != exe_dir() { format!("NXRT_LAUNCHER_DIR=\"{}\" %command%", dump::game_path(&exe_dir())) } else { String::new() };
+    let game_dir = p.game_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || steam::add(&exe, &game_dir, &launch, close)).await.map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 fn game_status(state: State<play::PlayState>) -> play::Status {
     state.0.lock().unwrap().clone()
@@ -591,6 +631,8 @@ fn main() {
             cancel_setup,
             play,
             game_status,
+            steam_status,
+            add_to_steam,
             open_game_file,
             open_game_dir,
             open_mods_dir,

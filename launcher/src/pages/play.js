@@ -37,6 +37,9 @@ export async function render(el, ctx) {
   const report = cfg.dump_dir && ov.repo_ok ? await api('validate_dump', { path: cfg.dump_dir }) : null;
   const chosen = report && report.chosen;
   let status = await api('game_status');
+  // Linux: fefw.exe as a non-Steam game (steam.rs)
+  let steam = await api('steam_status').catch(() => ({ available: false }));
+  let addingSteam = false;
 
   function draw() {
     const running = status.state === 'running';
@@ -82,6 +85,7 @@ export async function render(el, ctx) {
           <div class="row" style="margin-top: var(--space-4)">
             <button class="btn" id="open-dir" ${ov.repo_ok ? '' : 'disabled'}>${icon('folder-open')}${esc(t('play.openRunFolder'))}</button>
             <button class="btn" id="open-mods" ${ov.repo_ok ? '' : 'disabled'}>${icon('package')}${esc(t('play.openModsFolder'))}</button>
+            ${steam.available ? `<button class="btn" id="add-steam" title="${esc(t('play.addToSteamHint'))}" ${ov.exe_exists && !addingSteam ? '' : 'disabled'}>${icon(addingSteam ? 'loader-circle' : 'gamepad-2', addingSteam ? 'spin' : '')}${esc(t(steam.added ? 'play.updateSteam' : 'play.addToSteam'))}</button>` : ''}
           </div>
         </div>
         <p class="faint">${esc(t('play.footer'))}</p>
@@ -91,6 +95,18 @@ export async function render(el, ctx) {
     el.querySelector('#to-setup')?.addEventListener('click', () => ctx.go('setup'));
     el.querySelector('#open-dir')?.addEventListener('click', () => api('open_game_dir').catch((e) => toast(errText(e), 'error')));
     el.querySelector('#open-mods')?.addEventListener('click', () => api('open_mods_dir').catch((e) => toast(errText(e), 'error')));
+    el.querySelector('#add-steam')?.addEventListener('click', async () => {
+      addingSteam = true;
+      draw();
+      try {
+        toast(await api('add_to_steam'), 'ok');
+      } catch (e) {
+        toast(errText(e), 'error');
+      }
+      steam = await api('steam_status').catch(() => steam);
+      addingSteam = false;
+      draw();
+    });
     el.querySelectorAll('[data-open]').forEach((b) =>
       b.addEventListener('click', () => api('open_game_file', { name: b.dataset.open }).catch((e) => toast(errText(e), 'error'))),
     );

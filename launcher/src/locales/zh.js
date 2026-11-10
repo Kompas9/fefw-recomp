@@ -71,6 +71,9 @@ export const zh = {
     'play.modsHint': '把 RomFS 模组放在 mods/&lt;名称&gt;/romfs，与模拟器使用的目录结构一致。以 - 或 _ 开头的名称会关闭该模组；两个模组改动同一文件时，名称排序靠后的生效。ExeFS（代码）补丁不适用。',
     'play.openRunFolder': '打开运行目录',
     'play.openModsFolder': '打开模组目录',
+    'play.addToSteam': '添加到 Steam',
+    'play.updateSteam': '更新 Steam 快捷方式',
+    'play.addToSteamHint': '把 fefw.exe 作为非 Steam 游戏添加到 Steam（Steam 用 Proton 运行），可在大屏幕模式和 Steam Deck 的游戏模式中启动。',
     'play.footer': '游戏内：F1 打开运行时的设置浮层。此处设置会写入 fefw.ini 与 controls.ini，下次启动生效。',
 
     // ----- 构建 -----

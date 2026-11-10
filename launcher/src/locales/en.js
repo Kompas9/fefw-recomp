@@ -72,6 +72,9 @@ export const en = {
     'play.modsHint': 'RomFS mods in mods/&lt;name&gt;/romfs, the layout emulators use. A name starting with - or _ turns a mod off; when two mods change the same file, the name sorted last wins. ExeFS (code) patches do not apply.',
     'play.openRunFolder': 'Open run folder',
     'play.openModsFolder': 'Open mods folder',
+    'play.addToSteam': 'Add to Steam',
+    'play.updateSteam': 'Update Steam shortcut',
+    'play.addToSteamHint': 'Adds fefw.exe to Steam as a non-Steam game (Steam runs it with Proton), for Big Picture and the Steam Deck\'s Game Mode.',
     'play.footer': "In the game: F1 opens the runtime's settings overlay. Settings here edit fefw.ini and controls.ini and apply at the next start.",
 
     // ----- setup -----
