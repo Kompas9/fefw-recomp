@@ -55,12 +55,13 @@ fn report_files(dir: &Path, started: SystemTime) -> Vec<ReportFile> {
 }
 
 /// The command that starts fefw.exe: the program and its arguments before the exe. On Windows nothing (the exe itself). On Linux
-/// `custom` (the runner setting, split on spaces, e.g. `umu-run` or `wine`), else umu-run, else wine.
+/// `custom` (the runner setting, split into words like a shell does, so `"/path/Proton - Experimental/proton" run` works), else
+/// umu-run, else wine.
 pub fn runner(custom: &str) -> Result<Vec<String>, String> {
     if cfg!(windows) {
         return Ok(vec![]);
     }
-    let words: Vec<String> = custom.split_whitespace().map(String::from).collect();
+    let words = words(custom);
     if !words.is_empty() {
         return Ok(words);
     }
@@ -74,11 +75,55 @@ pub fn runner(custom: &str) -> Result<Vec<String>, String> {
         .into())
 }
 
+/// Shell-like words: spaces separate them, "..." and '...' group them, a backslash outside '...' takes the next character as is.
+fn words(s: &str) -> Vec<String> {
+    let (mut out, mut cur, mut any) = (Vec::new(), String::new(), false);
+    let mut quote: Option<char> = None;
+    let mut it = s.chars();
+    while let Some(c) = it.next() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some('\''), c) => cur.push(c),
+            (_, '\\') => {
+                if let Some(n) = it.next() {
+                    cur.push(n);
+                }
+                any = true;
+            }
+            (Some(_), c) => cur.push(c),
+            (None, '"' | '\'') => {
+                quote = Some(c);
+                any = true;
+            }
+            (None, c) if c.is_whitespace() => {
+                if any || !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                }
+                any = false;
+            }
+            (None, c) => cur.push(c),
+        }
+    }
+    if any || !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// Whether the runner is umu-run, also behind `env VAR=...`.
+fn is_umu(runner: &[String]) -> bool {
+    runner
+        .iter()
+        .find(|w| *w != "env" && !w.contains('='))
+        .is_some_and(|p| Path::new(p).file_name().is_some_and(|n| n == "umu-run"))
+}
+
 fn on_path(name: &str) -> bool {
     std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(name).is_file()))
 }
 
-pub fn start(app: &AppHandle, exe: &Path, game_dir: &Path, minimize: bool, runner_setting: &str) -> Result<(), String> {
+/// `launcher_dir`: the folder the package's upscalers/ is in (the AppImage's folder, not its mount).
+pub fn start(app: &AppHandle, exe: &Path, game_dir: &Path, launcher_dir: &Path, minimize: bool, runner_setting: &str) -> Result<(), String> {
     if app.state::<PlayState>().0.lock().unwrap().state == "running" {
         return Err("The game is already running.".into());
     }
@@ -89,6 +134,7 @@ pub fn start(app: &AppHandle, exe: &Path, game_dir: &Path, minimize: bool, runne
     let app2 = app.clone();
     let dir = game_dir.to_path_buf();
     let exe = exe.to_path_buf();
+    let launcher_dir = launcher_dir.to_path_buf();
     set_status(app, Status { state: "running".into(), message: "Starting fefw.exe...".into(), ..Default::default() });
     std::thread::spawn(move || {
         let mut cmd = match runner.split_first() {
@@ -97,7 +143,7 @@ pub fn start(app: &AppHandle, exe: &Path, game_dir: &Path, minimize: bool, runne
                 let mut c = Command::new(prog);
                 c.args(args).arg(&exe);
                 // umu-run wants a game id (it picks protonfixes for known games from it); "0" is the generic one its README uses
-                if prog.ends_with("umu-run") && std::env::var_os("GAMEID").is_none() {
+                if is_umu(&runner) && std::env::var_os("GAMEID").is_none() {
                     c.env("GAMEID", "0");
                 }
                 c
@@ -107,8 +153,11 @@ pub fn start(app: &AppHandle, exe: &Path, game_dir: &Path, minimize: bool, runne
         // fefw.exe reads fefw.ini from its working directory: every path comes from there
         cmd.current_dir(&dir);
         // the upscaler DLLs ship next to the launcher (upscalers/fsr, upscalers/streamline), which need not be the run folder
-        if let Some(d) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
-            cmd.env("NXRT_LAUNCHER_DIR", crate::dump::game_path(&d));
+        // (on Linux as fefw.exe sees it under Wine: Z:/...)
+        if cfg!(windows) {
+            cmd.env("NXRT_LAUNCHER_DIR", &launcher_dir);
+        } else {
+            cmd.env("NXRT_LAUNCHER_DIR", crate::dump::game_path(&launcher_dir));
         }
         #[cfg(windows)]
         {
@@ -171,6 +220,10 @@ mod tests {
             assert!(runner("wine").unwrap().is_empty());
         } else {
             assert_eq!(runner("  env WINEPREFIX=/p  wine ").unwrap(), ["env", "WINEPREFIX=/p", "wine"]);
+            assert_eq!(runner(r#""/s/Proton - Experimental/proton" run"#).unwrap(), ["/s/Proton - Experimental/proton", "run"]);
+            assert_eq!(runner(r"/a\ b/wine '' x").unwrap(), ["/a b/wine", "", "x"]);
+            assert!(is_umu(&words("env GAMEID=1 /usr/bin/umu-run")));
+            assert!(!is_umu(&words("wine")));
         }
     }
 }

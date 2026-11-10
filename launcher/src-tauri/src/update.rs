@@ -14,8 +14,20 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
-/// The GitHub repository whose releases the launcher follows.
-pub const REPO: &str = "Goldoire/fefw-recomp";
+/// The GitHub repository whose releases the launcher follows. FEFW_UPDATE_REPO at build time: a fork's launcher follows the fork.
+pub const REPO: &str = match option_env!("FEFW_UPDATE_REPO") {
+    Some(r) => r,
+    None => "Goldoire/fefw-recomp",
+};
+/// FEFW_BUILD_ID at build time: the release tag this launcher was built for (a fork tagging its releases by commit). Any other
+/// latest release then counts as newer, as tags like that have no order.
+pub const BUILD_ID: Option<&str> = option_env!("FEFW_BUILD_ID");
+/// The release asset for this platform, and files a downloaded package must have.
+#[cfg(windows)]
+const PACKAGE: (&str, &str, [&str; 4]) = ("-win64.zip", "Windows", ["fefw-launcher.exe", "fefw_rt.dll", "tools/build/fefw_build.py", "tools/python/python.exe"]);
+#[cfg(not(windows))]
+const PACKAGE: (&str, &str, [&str; 4]) =
+    ("-linux-x64.tar.gz", "Linux", ["fefw-launcher.AppImage", "fefw_rt.dll", "tools/build/fefw_build.py", "tools/python/bin/python3"]);
 const AGENT: &str = "fefw-launcher";
 /// The launcher's working folder inside the install folder: downloads, the unpacked package, the previous version's files.
 const WORK: &str = "update";
@@ -86,7 +98,7 @@ fn curl() -> Command {
     c
 }
 
-/// The latest published release of REPO and its Windows zip.
+/// The latest published release of REPO and its package for this platform.
 pub fn latest() -> Result<Release, String> {
     let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
     let out = curl()
@@ -103,8 +115,8 @@ pub fn latest() -> Result<Release, String> {
     let assets = v["assets"].as_array().cloned().unwrap_or_default();
     let zip = assets
         .iter()
-        .find(|a| a["name"].as_str().is_some_and(|n| n.starts_with("fefw-recomp-") && n.ends_with("-win64.zip")))
-        .ok_or_else(|| format!("Release {tag} has no Windows package."))?;
+        .find(|a| a["name"].as_str().is_some_and(|n| n.starts_with("fefw-recomp-") && n.ends_with(PACKAGE.0)))
+        .ok_or_else(|| format!("Release {tag} has no {} package.", PACKAGE.1))?;
     let digest = zip["digest"].as_str().unwrap_or_default();
     Ok(Release {
         name: v["name"].as_str().filter(|s| !s.is_empty()).unwrap_or(tag).to_string(),
@@ -120,7 +132,10 @@ pub fn latest() -> Result<Release, String> {
 
 pub fn check(current: &str, package: bool) -> Result<Check, String> {
     let rel = latest()?;
-    let newer = matches!((parse_version(&rel.version), parse_version(current)), (Some(a), Some(b)) if a > b);
+    let newer = match BUILD_ID {
+        Some(_) => !rel.version.is_empty() && rel.version != current,
+        None => matches!((parse_version(&rel.version), parse_version(current)), (Some(a), Some(b)) if a > b),
+    };
     Ok(Check { current: current.to_string(), latest: Some(rel), newer, package })
 }
 
@@ -266,7 +281,7 @@ impl Run<'_> {
             [one] => one.clone(),
             _ => return Err("The package does not have the expected layout.".into()),
         };
-        for need in ["fefw-launcher.exe", "fefw_rt.dll", "tools/build/fefw_build.py", "tools/python/python.exe"] {
+        for need in PACKAGE.2 {
             if !top.join(need).is_file() {
                 return Err(format!("The package is missing {need}."));
             }
@@ -388,7 +403,7 @@ pub fn rebuild_needed(install: &Path, game_dir: &Path) -> (Option<bool>, String)
     if !game_dir.join("fefw.exe").is_file() {
         return (Some(true), "fefw.exe is not built yet".into());
     }
-    let mut c = Command::new(tools.join("python").join("python.exe"));
+    let mut c = Command::new(crate::setup::package_python(&tools));
     c.arg("-I").arg(tools.join("build").join("fefw_build.py")).arg("--check").arg("--game").arg(game_dir);
     crate::setup::quiet(&mut c);
     match c.stdin(Stdio::null()).output() {

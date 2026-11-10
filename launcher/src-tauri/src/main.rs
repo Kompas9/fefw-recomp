@@ -426,17 +426,20 @@ fn play(app: AppHandle, state: State<Arc<setup::Shared>>) -> Result<(), String> 
         return Err("Setup is not finished: open Setup and press Set up.".into());
     }
     settings::ensure_play_paths(&p.game_dir, &p)?;
-    play::start(&app, &p.exe(), &p.game_dir, cfg.minimize_on_play, &cfg.runner)
+    play::start(&app, &p.exe(), &p.game_dir, &exe_dir(), cfg.minimize_on_play, &cfg.runner)
 }
 
 /// Linux: whether Steam is installed and the shortcut to fefw.exe exists.
 #[tauri::command]
-fn steam_status(app: AppHandle) -> steam::State {
-    let cfg = load_config(&app);
-    match paths(&cfg) {
+async fn steam_status(app: AppHandle) -> steam::State {
+    // off the main thread: it reads the dump folder and walks /proc
+    let none = steam::State { available: false, running: false, added: false };
+    tauri::async_runtime::spawn_blocking(move || match paths(&load_config(&app)) {
         Ok(p) => steam::state(&p.exe()),
         Err(_) => steam::State { available: false, running: false, added: false },
-    }
+    })
+    .await
+    .unwrap_or(none)
 }
 
 /// Linux: adds fefw.exe to Steam as a non-Steam game. Steam has to be closed for that: when it runs, the player is asked first.
@@ -463,9 +466,9 @@ async fn add_to_steam(app: AppHandle) -> Result<String, String> {
         return Err("Not added: Steam is still running.".into());
     }
     // the upscaler DLLs next to the launcher: fefw.exe finds them by itself when the run folder is the install folder
-    let launch = if p.game_dir != exe_dir() { format!("NXRT_LAUNCHER_DIR=\"{}\" %command%", dump::game_path(&exe_dir())) } else { String::new() };
+    let launcher_dir = (p.game_dir != exe_dir()).then(|| dump::game_path(&exe_dir()));
     let game_dir = p.game_dir.clone();
-    tauri::async_runtime::spawn_blocking(move || steam::add(&exe, &game_dir, &launch, close)).await.map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || steam::add(&exe, &game_dir, launcher_dir.as_deref(), close)).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -517,7 +520,7 @@ fn open_setup_log(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 async fn check_update(app: AppHandle) -> Result<update::Check, String> {
     // FEFW_LAUNCHER_PRETEND_VERSION: test the update path against the published release from an older-looking launcher
-    let current = std::env::var("FEFW_LAUNCHER_PRETEND_VERSION").ok().filter(|v| update::parse_version(v).is_some()).unwrap_or_else(|| app.package_info().version.to_string());
+    let current = std::env::var("FEFW_LAUNCHER_PRETEND_VERSION").ok().filter(|v| update::parse_version(v).is_some()).unwrap_or_else(|| update::BUILD_ID.map(String::from).unwrap_or_else(|| app.package_info().version.to_string()));
     let package = package_tools().is_some();
     tauri::async_runtime::spawn_blocking(move || update::check(&current, package)).await.map_err(|e| e.to_string())?
 }
@@ -541,10 +544,6 @@ fn start_update(
 ) -> Result<(), String> {
     if package_tools().is_none() {
         return Err("Updates are for the release package. In a checkout, use git.".into());
-    }
-    if !cfg!(windows) {
-        // the release zip is the Windows package (fefw-launcher.exe, python.exe, zig.exe): installing it here would break the install
-        return Err("Updating from the launcher is Windows-only for now. Download the new release and extract it over this folder.".into());
     }
     if setup_state.progress.lock().unwrap().state == "running" {
         return Err("Setup is running. Wait for it or pause it first.".into());

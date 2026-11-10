@@ -11,7 +11,7 @@ fefw.exe is a Windows program: the launcher builds it on this PC and starts it t
 3. Press Play. This needs umu-launcher (umu-run) or Wine; Settings > Runner sets another command.
    Or press Add to Steam on the Play page: Steam then runs fefw.exe with Proton, also in the Steam Deck's Game Mode.
 
-Updating: extract the new package over this folder and press Set up again in the launcher (Desktop Mode on a Steam Deck) before
-playing from Steam. Your saves are kept (save/).
+Updating: the launcher's About page installs a new release (or extract the new package over this folder). Then press Set up again
+in the launcher if it asks (Desktop Mode on a Steam Deck) before playing from Steam. Your saves are kept (save/).
 
 Licences: LICENSE.txt, LEGAL.txt and licenses/.

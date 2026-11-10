@@ -155,7 +155,7 @@ fn package_build_ok(p: &Paths) -> bool {
 /// The release package's Python: tools/python/python.exe (the embeddable package) on Windows. On Linux tools/python/bin/python3
 /// (a relocatable build) when the package has one, else the system's python3, which then needs the lifter's packages (zbic, lz4,
 /// capstone, zstandard) installed.
-fn package_python(tools: &Path) -> PathBuf {
+pub(crate) fn package_python(tools: &Path) -> PathBuf {
     if cfg!(windows) {
         return tools.join("python").join("python.exe");
     }
@@ -294,6 +294,9 @@ pub fn complete(p: &Paths) -> bool {
 /// that outlives the launcher (Steam started again by Add to Steam). Variables naming the mount lose those entries (and go when
 /// nothing is left); the AppImage's own variables go. Nothing changes outside an AppImage.
 pub(crate) fn host_env(cmd: &mut Command) {
+    if !cfg!(target_os = "linux") {
+        return;
+    }
     let vars: Vec<(String, String)> = std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?))).collect();
     for (k, v) in appimage_fixes(&vars) {
         match v {
@@ -305,6 +308,10 @@ pub(crate) fn host_env(cmd: &mut Command) {
 
 /// What host_env changes in `vars` (an environment with an AppImage's APPDIR in it): (name, new value), None removes it.
 pub(crate) fn appimage_fixes(vars: &[(String, String)]) -> Vec<(String, Option<String>)> {
+    // only an AppImage's AppRun: on Windows (';' lists) or with an APPDIR some other program set, nothing is touched
+    if !cfg!(target_os = "linux") || !vars.iter().any(|(k, v)| k == "APPIMAGE" && !v.is_empty()) {
+        return vec![];
+    }
     let Some(appdir) = vars.iter().find(|(k, _)| k == "APPDIR").map(|(_, d)| d.trim_end_matches('/').to_string()).filter(|d| d.len() > 1) else {
         return vec![];
     };

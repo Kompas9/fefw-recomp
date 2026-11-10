@@ -37,8 +37,10 @@ done
 [ "$(uname -m)" = x86_64 ] || { echo "build on x86_64 Linux: the AppImage and the Python packages are for the machine they are built on" >&2; exit 2; }
 
 # WSL appends the Windows PATH; linuxdeploy (the AppImage step) crashes on an unreadable entry among them (WindowsApps)
-PATH=$(echo "$PATH" | tr ':' '\n' | grep -v '^/mnt/' | paste -sd:)
-export PATH
+if grep -qi microsoft /proc/version 2>/dev/null; then
+    PATH=$(echo "$PATH" | tr ':' '\n' | grep -v '^/mnt/' | paste -sd:)
+    export PATH
+fi
 
 # keep these with make-release.ps1 (Zig) and launcher/src-tauri/src/setup.rs (Ryujinx revision)
 ZIG_VERSION=0.17.0
@@ -113,7 +115,8 @@ py="$CACHE/$PYTHON_BUILD"
 [ -f "$py" ] || mv "$py.part" "$py"
 echo "$PYTHON_SHA256  $py" | sha256sum -c --quiet || { rm -f "$py"; echo "sha256 mismatch: $py" >&2; exit 1; }
 tar xf "$py" -C "$PKG/tools"   # unpacks as python/
-"$PKG/tools/python/bin/python3" -m pip install --quiet --no-cache-dir --disable-pip-version-check capstone==5.0.9 lz4 zbic zstandard
+"$PKG/tools/python/bin/python3" -m pip install --quiet --no-cache-dir --disable-pip-version-check --only-binary=:all: \
+    capstone==5.0.9 lz4==4.4.5 zbic==1.0.1.post1 zstandard==0.25.0   # pinned: the same packages in every build
 "$PKG/tools/python/bin/python3" -I -c "import zbic, lz4, capstone, zstandard"
 # the launcher runs bin/python3 -I only: pip's console scripts carry this machine's absolute path in their shebangs
 find "$PKG/tools/python/bin" -maxdepth 1 -type f \( -name 'pip*' -o -name 'idle*' -o -name 'pydoc*' -o -name '2to3*' \) -delete
@@ -126,11 +129,20 @@ bad=$(find "$PKG" \( -iname '*.nso' -o -iname '*.nro' -o -iname '*.nca' -o -inam
     -o -iname '*.nsz' -o -iname '*.xcz' -o -iname '*.spv' -o -iname '*.keys' -o -iname '*.sav' -o -name fefw.exe -o -name fefw.ini \
     -o -name controls.ini -o -name exefs -o -name romfs -o -name shader_cache -o -name save -o -name saves \) -print)
 [ -z "$bad" ] || { echo "game-derived or private files in the package:"; echo "$bad"; exit 1; } >&2
-# and nothing that names the machine it was built on
+# and nothing that names the machine it was built on: the home folder or the checkout, also inside the AppImage (compressed)
+check="$STAGE/appimage-check"
+mkdir -p "$check"
+(cd "$check" && "$PKG/fefw-launcher.AppImage" --appimage-extract >/dev/null)
 leaks=""
-[ ${#HOME} -lt 8 ] || leaks=$(grep -rl --binary-files=text -F "$HOME" "$PKG" || true)
-[ -z "$leaks" ] || { echo "build-machine path ($HOME) in:"; echo "$leaks"; exit 1; } >&2
+for n in "$HOME" "$ROOT"; do
+    [ ${#n} -ge 8 ] || continue
+    leaks+="$(grep -rl --binary-files=text -F "$n" "$PKG" "$check" || true)"$'\n'
+done
+rm -rf "$check"
+[ -z "${leaks//$'\n'/}" ] || { echo "build-machine path ($HOME or $ROOT) in:"; echo "$leaks" | sort -u; exit 1; } >&2
 
+# the same bytes for the same inputs: sorted, owned by root, dated at the commit, no gzip timestamp
 tarball="$OUT/$NAME-linux-x64.tar.gz"
-tar -C "$STAGE" -czf "$tarball" "$NAME"
+when=$(git -C "$ROOT" log -1 --format=%ct 2>/dev/null || echo 0)
+tar -C "$STAGE" --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$when" -cf - "$NAME" | gzip -n -9 > "$tarball"
 echo "wrote $tarball ($(( $(stat -c %s "$tarball") / 1048576 )) MiB)"
