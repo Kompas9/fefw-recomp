@@ -72,6 +72,9 @@ export const en = {
     'play.modsHint': 'RomFS mods in mods/&lt;name&gt;/romfs, the layout emulators use. A name starting with - or _ turns a mod off; when two mods change the same file, the name sorted last wins. ExeFS (code) patches do not apply.',
     'play.openRunFolder': 'Open run folder',
     'play.openModsFolder': 'Open mods folder',
+    'play.addToSteam': 'Add to Steam',
+    'play.updateSteam': 'Update Steam shortcut',
+    'play.addToSteamHint': 'Adds fefw.exe to Steam as a non-Steam game (Steam runs it with Proton), for Big Picture and the Steam Deck\'s Game Mode.',
     'play.footer': "In the game: F1 opens the runtime's settings overlay. Settings here edit fefw.ini and controls.ini and apply at the next start.",
 
     // ----- setup -----
@@ -307,6 +310,9 @@ export const en = {
     'settings.jobs.label': 'Build processes',
     'settings.jobs.hint': '0: one fewer than your CPU threads. Lower it if the PC runs out of memory while building.',
     'settings.minimizeOnPlay.label': 'Minimise while the game runs',
+    'settings.runner.label': 'Runner (Wine / Proton)',
+    'settings.runner.placeholder': 'Steam\'s Proton if installed, else umu-run, else wine',
+    'settings.runner.hint': 'The command that starts fefw.exe on Linux, for example umu-run (Proton) or wine. Empty: Steam\'s Proton (Experimental, else the newest installed) in the Steam Linux Runtime, else umu-run, else wine. The path to fefw.exe is added after it.',
 
     // ----- about -----
     'about.launcherWord': 'launcher',
@@ -321,6 +327,7 @@ export const en = {
     'about.available': 'Version {version} is available',
     'about.availableMeta': '(you have {current}, download {size} MiB)',
     'about.fullNotes': 'Full notes: ',
+    'about.noPackage': 'This release has no package for this system yet, so the launcher cannot install it. Watch its release page.',
     'about.downloadHint': 'The launcher downloads and checks the new version, then asks to restart. Your saves, settings and built game stay.',
     'about.updateTo': 'Update to {version}',
     'about.checkNow': 'Check now',

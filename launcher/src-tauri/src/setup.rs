@@ -62,7 +62,7 @@ impl Paths {
     }
     pub fn python(&self) -> PathBuf {
         match &self.package {
-            Some(t) => t.join("python").join("python.exe"),
+            Some(t) => package_python(t),
             None => self.repo.join("tools").join(".venv").join("Scripts").join("python.exe"),
         }
     }
@@ -87,7 +87,7 @@ impl Paths {
     }
     pub fn harness(&self) -> PathBuf {
         match &self.package {
-            Some(t) => t.join("spirv_harness").join("spirv_harness.exe"),
+            Some(t) => t.join("spirv_harness").join(if cfg!(windows) { "spirv_harness.exe" } else { "spirv_harness" }),
             None => self.repo.join("tools").join("shaders").join("build").join("bin").join("Release").join("net10.0").join("spirv_harness.dll"),
         }
     }
@@ -150,6 +150,20 @@ fn package_build_ok(p: &Paths) -> bool {
     let ok = cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().map(|s| s.success()).unwrap_or(false);
     *BUILD_CHECK.lock().unwrap() = Some((key, ok));
     ok
+}
+
+/// The release package's Python: tools/python/python.exe (the embeddable package) on Windows. On Linux tools/python/bin/python3
+/// (a relocatable build) when the package has one, else the system's python3, which then needs the lifter's packages (zbic, lz4,
+/// capstone, zstandard) installed.
+pub(crate) fn package_python(tools: &Path) -> PathBuf {
+    if cfg!(windows) {
+        return tools.join("python").join("python.exe");
+    }
+    let bundled = tools.join("python").join("bin").join("python3");
+    if bundled.is_file() {
+        return bundled;
+    }
+    which("python3").unwrap_or(bundled)
 }
 
 pub fn exe_path(repo: &Path) -> PathBuf {
@@ -275,12 +289,57 @@ pub fn complete(p: &Paths) -> bool {
     steps(p, None).iter().all(|s| s.state == "done")
 }
 
+/// A program started from the AppImage gets the host's environment, not the AppImage's: its AppRun points PYTHONHOME, GTK_*,
+/// GIO/GST/QT module paths and more into its temporary mount, which breaks Python programs (umu-run, Proton's script) and anything
+/// that outlives the launcher (Steam started again by Add to Steam). Variables naming the mount lose those entries (and go when
+/// nothing is left); the AppImage's own variables go. Nothing changes outside an AppImage.
+pub(crate) fn host_env(cmd: &mut Command) {
+    if !cfg!(target_os = "linux") {
+        return;
+    }
+    let vars: Vec<(String, String)> = std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?))).collect();
+    for (k, v) in appimage_fixes(&vars) {
+        match v {
+            Some(v) => cmd.env(k, v),
+            None => cmd.env_remove(k),
+        };
+    }
+}
+
+/// What host_env changes in `vars` (an environment with an AppImage's APPDIR in it): (name, new value), None removes it.
+pub(crate) fn appimage_fixes(vars: &[(String, String)]) -> Vec<(String, Option<String>)> {
+    // only an AppImage's AppRun: on Windows (';' lists) or with an APPDIR some other program set, nothing is touched
+    if !cfg!(target_os = "linux") || !vars.iter().any(|(k, v)| k == "APPIMAGE" && !v.is_empty()) {
+        return vec![];
+    }
+    let Some(appdir) = vars.iter().find(|(k, _)| k == "APPDIR").map(|(_, d)| d.trim_end_matches('/').to_string()).filter(|d| d.len() > 1) else {
+        return vec![];
+    };
+    let mut out = vec![];
+    for (k, v) in vars {
+        if matches!(k.as_str(), "APPDIR" | "APPIMAGE" | "ARGV0" | "OWD" | "PYTHONHOME" | "PYTHONPATH" | "PYTHONDONTWRITEBYTECODE" | "PERLLIB") {
+            out.push((k.clone(), None));
+        } else if v.contains(&appdir) {
+            let kept: Vec<&str> = v.split(':').filter(|p| !p.is_empty() && !p.contains(&appdir)).collect();
+            out.push((k.clone(), (!kept.is_empty()).then(|| kept.join(":"))));
+        }
+    }
+    out
+}
+
 pub(crate) fn quiet(cmd: &mut Command) {
+    host_env(cmd);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         // CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS (the compilers it starts inherit it)
         cmd.creation_flags(0x0800_0000 | 0x0000_4000);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // its own process group, so kill_tree ends everything it starts (the lifter's workers, the compilers)
+        cmd.process_group(0);
     }
 }
 
@@ -289,10 +348,18 @@ pub fn kill_tree(pid: u32) {
     if pid == 0 {
         return;
     }
-    let mut cmd = Command::new("taskkill");
-    cmd.args(["/T", "/F", "/PID", &pid.to_string()]);
-    quiet(&mut cmd);
-    let _ = cmd.stdout(Stdio::null()).stderr(Stdio::null()).status();
+    #[cfg(windows)]
+    {
+        let mut cmd = Command::new("taskkill");
+        cmd.args(["/T", "/F", "/PID", &pid.to_string()]);
+        quiet(&mut cmd);
+        let _ = cmd.stdout(Stdio::null()).stderr(Stdio::null()).status();
+    }
+    #[cfg(unix)]
+    {
+        // quiet() made the process a group leader: a negative pid signals the whole group
+        let _ = Command::new("kill").args(["-KILL", "--", &format!("-{pid}")]).stdout(Stdio::null()).stderr(Stdio::null()).status();
+    }
 }
 
 /// ninja's "[12/345] ..." prefix.

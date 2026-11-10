@@ -48,6 +48,17 @@ pub fn fwd(p: &Path) -> String {
     p.to_string_lossy().replace('\\', "/")
 }
 
+/// A path as fefw.exe sees it. On Windows that is the path itself. On Linux fefw.exe runs under Wine/Proton, where the host's `/`
+/// is drive Z: (every Wine and Proton prefix maps it), so an absolute path becomes `Z:/...`; a relative one stays as it is.
+pub fn game_path(p: &Path) -> String {
+    let s = fwd(p);
+    if cfg!(windows) || !s.starts_with('/') {
+        s
+    } else {
+        format!("Z:{s}")
+    }
+}
+
 /// The builds of main the recomp supports: `BUILDS = { '<40 hex>': '<version>', ... }` in recomp/games/fefw/config.py.
 pub fn supported_builds(repo: &Path) -> Vec<(String, String)> {
     let text = fs::read_to_string(repo.join("recomp").join("games").join("fefw").join("config.py")).unwrap_or_default();
@@ -188,6 +199,16 @@ pub fn scan(path: &str, builds: &[(String, String)]) -> DumpReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn game_paths_for_wine() {
+        assert_eq!(game_path(Path::new("save")), "save");
+        if cfg!(windows) {
+            assert_eq!(game_path(Path::new(r"C:\games\fefw\exefs")), "C:/games/fefw/exefs");
+        } else {
+            assert_eq!(game_path(Path::new("/home/deck/fefw/exefs")), "Z:/home/deck/fefw/exefs");
+        }
+    }
 
     #[test]
     fn build_id_of_an_nso_header() {

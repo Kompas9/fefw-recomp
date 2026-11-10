@@ -71,6 +71,9 @@ export const zh = {
     'play.modsHint': '把 RomFS 模组放在 mods/&lt;名称&gt;/romfs，与模拟器使用的目录结构一致。以 - 或 _ 开头的名称会关闭该模组；两个模组改动同一文件时，名称排序靠后的生效。ExeFS（代码）补丁不适用。',
     'play.openRunFolder': '打开运行目录',
     'play.openModsFolder': '打开模组目录',
+    'play.addToSteam': '添加到 Steam',
+    'play.updateSteam': '更新 Steam 快捷方式',
+    'play.addToSteamHint': '把 fefw.exe 作为非 Steam 游戏添加到 Steam（Steam 用 Proton 运行），可在大屏幕模式和 Steam Deck 的游戏模式中启动。',
     'play.footer': '游戏内：F1 打开运行时的设置浮层。此处设置会写入 fefw.ini 与 controls.ini，下次启动生效。',
 
     // ----- 构建 -----
@@ -291,6 +294,9 @@ export const zh = {
     'settings.jobs.label': '构建进程数',
     'settings.jobs.hint': '0：比 CPU 线程数少一个。构建时内存不足可调低。',
     'settings.minimizeOnPlay.label': '游戏运行时最小化',
+    'settings.runner.label': '运行器（Wine / Proton）',
+    'settings.runner.placeholder': '优先用 Steam 自带的 Proton，其次 umu-run，最后 wine',
+    'settings.runner.hint': '在 Linux 上启动 fefw.exe 的命令，例如 umu-run（Proton）或 wine。留空时依次尝试 Steam 自带的 Proton、umu-run、wine。fefw.exe 的路径会加在其后。',
 
     // ----- 关于 -----
     'about.launcherWord': '启动器',
@@ -305,6 +311,7 @@ export const zh = {
     'about.available': '有可用版本 {version}',
     'about.availableMeta': '（当前 {current}，需下载 {size} MiB）',
     'about.fullNotes': '完整说明：',
+    'about.noPackage': '此版本还没有适用于本系统的安装包，启动器无法安装。请关注它的发布页面。',
     'about.downloadHint': '启动器会下载并校验新版本，然后请求重启。你的存档、设置与已构建的游戏都会保留。',
     'about.updateTo': '更新到 {version}',
     'about.checkNow': '立即检查',

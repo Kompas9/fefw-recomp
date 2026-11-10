@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Updates of the release package from inside the launcher: asks GitHub for the latest release, downloads its zip (Windows' own
-//! curl.exe), checks it against the SHA-256 digest GitHub lists for the asset, unpacks it (Windows' own tar.exe) and moves the new
-//! files over the install folder. Everything the old package had is moved to update/old first and moved back if any step fails.
+//! Updates of the release package from inside the launcher: asks GitHub for the latest release, downloads its package for this
+//! platform (the -win64.zip, or the -linux-x64.tar.gz) with curl (Windows' own curl.exe), checks it against the SHA-256 digest
+//! GitHub lists for the asset, unpacks it with tar (Windows' own tar.exe) and moves the new files over the install folder. Everything the old package had is moved to update/old first and moved back if any step fails.
 //! The player's files (fefw.exe, fefw.ini, controls.ini, save/, shader_cache/, build/, logs) are not in the zip and stay as they are.
 //! Afterwards the new package's `fefw_build.py --check` says whether fefw.exe has to be built again (Set up).
 
@@ -14,9 +14,23 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
-/// The GitHub repository whose releases the launcher follows.
-pub const REPO: &str = "Goldoire/fefw-recomp";
+/// The GitHub repository whose releases the launcher follows. FEFW_UPDATE_REPO at build time: a fork's launcher follows the fork.
+pub const REPO: &str = match option_env!("FEFW_UPDATE_REPO") {
+    Some(r) => r,
+    None => "Goldoire/fefw-recomp",
+};
+/// FEFW_BUILD_ID at build time: the release tag this launcher was built for (a fork tagging its releases by commit). Any other
+/// latest release then counts as newer, as tags like that have no order.
+pub const BUILD_ID: Option<&str> = option_env!("FEFW_BUILD_ID");
+/// The release asset for this platform, and files a downloaded package must have.
+#[cfg(windows)]
+const PACKAGE: (&str, &str, [&str; 4]) = ("-win64.zip", "Windows", ["fefw-launcher.exe", "fefw_rt.dll", "tools/build/fefw_build.py", "tools/python/python.exe"]);
+#[cfg(not(windows))]
+const PACKAGE: (&str, &str, [&str; 4]) =
+    ("-linux-x64.tar.gz", "Linux", ["fefw-launcher.AppImage", "fefw_rt.dll", "tools/build/fefw_build.py", "tools/python/bin/python3"]);
 const AGENT: &str = "fefw-launcher";
+const CURL: &str = if cfg!(windows) { "curl.exe" } else { "curl" };
+const TAR: &str = if cfg!(windows) { "tar.exe" } else { "tar" };
 /// The launcher's working folder inside the install folder: downloads, the unpacked package, the previous version's files.
 const WORK: &str = "update";
 
@@ -71,26 +85,30 @@ pub fn parse_version(s: &str) -> Option<(u64, u64, u64)> {
 }
 
 fn system_tool(name: &str) -> PathBuf {
+    if !cfg!(windows) {
+        return PathBuf::from(name.trim_end_matches(".exe")); // curl and tar from PATH
+    }
     let root = std::env::var_os("SystemRoot").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
     let p = root.join("System32").join(name);
     if p.is_file() { p } else { PathBuf::from(name) }
 }
 
 fn curl() -> Command {
-    let mut c = Command::new(system_tool("curl.exe"));
+    let mut c = Command::new(system_tool(CURL));
     c.args(["--fail", "--location", "--silent", "--show-error", "--user-agent", AGENT]);
     crate::setup::quiet(&mut c);
     c
 }
 
-/// The latest published release of REPO and its Windows zip.
+/// The latest published release of REPO and its package for this platform. A release without one (Linux, while only the Windows
+/// zip is published) comes back with an empty asset: it can be shown, not installed.
 pub fn latest() -> Result<Release, String> {
     let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
     let out = curl()
         .args(["--retry", "2", "--retry-all-errors", "--max-time", "30", "--header", "Accept: application/vnd.github+json", &url])
         .stdin(Stdio::null())
         .output()
-        .map_err(|e| format!("cannot run curl.exe: {e}"))?;
+        .map_err(|e| format!("cannot run {CURL}: {e}"))?;
     if !out.status.success() {
         return Err(format!("Could not reach GitHub: {}", String::from_utf8_lossy(&out.stderr).trim()));
     }
@@ -98,10 +116,8 @@ pub fn latest() -> Result<Release, String> {
     let tag = v["tag_name"].as_str().unwrap_or_default();
     let version = tag.trim_start_matches(['v', 'V']).to_string();
     let assets = v["assets"].as_array().cloned().unwrap_or_default();
-    let zip = assets
-        .iter()
-        .find(|a| a["name"].as_str().is_some_and(|n| n.starts_with("fefw-recomp-") && n.ends_with("-win64.zip")))
-        .ok_or_else(|| format!("Release {tag} has no Windows package."))?;
+    let none = serde_json::Value::Null;
+    let zip = assets.iter().find(|a| a["name"].as_str().is_some_and(|n| n.starts_with("fefw-recomp-") && n.ends_with(PACKAGE.0))).unwrap_or(&none);
     let digest = zip["digest"].as_str().unwrap_or_default();
     Ok(Release {
         name: v["name"].as_str().filter(|s| !s.is_empty()).unwrap_or(tag).to_string(),
@@ -117,7 +133,10 @@ pub fn latest() -> Result<Release, String> {
 
 pub fn check(current: &str, package: bool) -> Result<Check, String> {
     let rel = latest()?;
-    let newer = matches!((parse_version(&rel.version), parse_version(current)), (Some(a), Some(b)) if a > b);
+    let newer = match BUILD_ID {
+        Some(_) => !rel.version.is_empty() && rel.version != current.trim_start_matches(['v', 'V']),
+        None => matches!((parse_version(&rel.version), parse_version(current)), (Some(a), Some(b)) if a > b),
+    };
     Ok(Check { current: current.to_string(), latest: Some(rel), newer, package })
 }
 
@@ -164,7 +183,7 @@ impl Run<'_> {
 
     pub fn run(&self, rel: &Release) -> Result<Status, String> {
         if rel.sha256.len() != 64 {
-            return Err("GitHub lists no checksum for this download, so it cannot be verified. Download the zip from the release page instead.".into());
+            return Err("GitHub lists no checksum for this download, so it cannot be verified. Download the package from the release page instead.".into());
         }
         if rel.asset_name.contains(['/', '\\']) || rel.asset_name.contains("..") {
             return Err("The release's file name is not usable.".into());
@@ -210,7 +229,7 @@ impl Run<'_> {
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| format!("cannot run curl.exe: {e}"))?;
+            .map_err(|e| format!("cannot run {CURL}: {e}"))?;
         let mb = |b: u64| b as f64 / (1024.0 * 1024.0);
         let status = loop {
             if let Some(s) = child.try_wait().map_err(|e| e.to_string())? {
@@ -251,10 +270,10 @@ impl Run<'_> {
             fs::remove_dir_all(stage).map_err(|e| format!("cannot clear {}: {e}", stage.display()))?;
         }
         fs::create_dir_all(stage).map_err(|e| format!("cannot create {}: {e}", stage.display()))?;
-        let mut c = Command::new(system_tool("tar.exe"));
+        let mut c = Command::new(system_tool(TAR));
         c.arg("-xf").arg(zip).arg("-C").arg(stage);
         crate::setup::quiet(&mut c);
-        let out = c.stdin(Stdio::null()).output().map_err(|e| format!("cannot run tar.exe: {e}"))?;
+        let out = c.stdin(Stdio::null()).output().map_err(|e| format!("cannot run {TAR}: {e}"))?;
         if !out.status.success() {
             return Err(format!("Unpacking failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
         }
@@ -263,7 +282,7 @@ impl Run<'_> {
             [one] => one.clone(),
             _ => return Err("The package does not have the expected layout.".into()),
         };
-        for need in ["fefw-launcher.exe", "fefw_rt.dll", "tools/build/fefw_build.py", "tools/python/python.exe"] {
+        for need in PACKAGE.2 {
             if !top.join(need).is_file() {
                 return Err(format!("The package is missing {need}."));
             }
@@ -309,7 +328,7 @@ fn rename_retry(from: &Path, to: &Path) -> std::io::Result<()> {
 /// under it, a file can). Each old file goes to `old` first: the files the new package replaces, and in the package's own folders
 /// (those the new package has, such as tools/) the files it no longer has. Anything else in the install folder (fefw.exe,
 /// fefw.ini, save/, shader_cache/, build/) is left alone. Any failure moves back what was already moved. The running launcher
-/// can be moved too (Windows allows renaming a running exe).
+/// can be moved too (Windows allows renaming a running exe; on Linux the running AppImage keeps its old file until it exits).
 pub fn install(install: &Path, top: &Path, old: &Path) -> Result<(), String> {
     if old.exists() {
         fs::remove_dir_all(old).map_err(|e| format!("cannot clear {} (close any program using it): {e}", old.display()))?;
@@ -346,7 +365,8 @@ pub fn install(install: &Path, top: &Path, old: &Path) -> Result<(), String> {
         }
         for rel in &new_files {
             let target = install.join(rel);
-            let had = target.exists();
+            // symlink_metadata: a symlink (python-build-standalone has them) whose target was moved aside still counts
+            let had = fs::symlink_metadata(&target).is_ok();
             // a language table is added, never replaced: the copy in the install folder may be the player's own.
             let shared = rel.components().next().is_some_and(|c| c.as_os_str().to_string_lossy().eq_ignore_ascii_case("locales"));
             if had && shared {
@@ -385,7 +405,7 @@ pub fn rebuild_needed(install: &Path, game_dir: &Path) -> (Option<bool>, String)
     if !game_dir.join("fefw.exe").is_file() {
         return (Some(true), "fefw.exe is not built yet".into());
     }
-    let mut c = Command::new(tools.join("python").join("python.exe"));
+    let mut c = Command::new(crate::setup::package_python(&tools));
     c.arg("-I").arg(tools.join("build").join("fefw_build.py")).arg("--check").arg("--game").arg(game_dir);
     crate::setup::quiet(&mut c);
     match c.stdin(Stdio::null()).output() {

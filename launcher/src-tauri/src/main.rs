@@ -11,6 +11,7 @@ mod nup;
 mod play;
 mod settings;
 mod setup;
+mod steam;
 mod update;
 
 use serde::{Deserialize, Serialize};
@@ -37,6 +38,9 @@ struct Config {
     minimize_on_play: bool,
     /// do not ask GitHub for a newer release when the launcher starts
     skip_update_check: bool,
+    /// Linux: the command that starts fefw.exe (Wine or Proton, e.g. `umu-run` or `wine`). Empty: Steam's own Proton if it is
+    /// installed, else umu-run, else wine. Unused on Windows.
+    runner: String,
     /// The launcher's own interface language ("en", "zh", or the code of a language pack in locales/). Empty: English.
     lang: String,
 }
@@ -52,6 +56,11 @@ fn load_config(app: &AppHandle) -> Config {
 }
 
 fn exe_dir() -> PathBuf {
+    // an AppImage runs from a temporary mount: the package is the folder the .AppImage file is in
+    #[cfg(target_os = "linux")]
+    if let Some(d) = std::env::var_os("APPIMAGE").map(PathBuf::from).and_then(|p| p.parent().map(|d| d.to_path_buf())) {
+        return d;
+    }
     std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())).unwrap_or_else(|| PathBuf::from("."))
 }
 
@@ -417,7 +426,55 @@ fn play(app: AppHandle, state: State<Arc<setup::Shared>>) -> Result<(), String> 
         return Err("Setup is not finished: open Setup and press Set up.".into());
     }
     settings::ensure_play_paths(&p.game_dir, &p)?;
-    play::start(&app, &p.exe(), &p.game_dir, cfg.minimize_on_play)
+    play::start(&app, &p.exe(), &p.game_dir, &exe_dir(), cfg.minimize_on_play, &cfg.runner)
+}
+
+/// Linux: whether Steam is installed and the shortcut to fefw.exe exists.
+#[tauri::command]
+async fn steam_status(app: AppHandle) -> steam::State {
+    // off the main thread: it reads the dump folder and walks /proc
+    let none = steam::State { available: false, running: false, added: false };
+    if !cfg!(target_os = "linux") {
+        return none;
+    }
+    tauri::async_runtime::spawn_blocking(move || match paths(&load_config(&app)) {
+        Ok(p) => steam::state(&p.exe()),
+        Err(_) => steam::State { available: false, running: false, added: false },
+    })
+    .await
+    .unwrap_or(none)
+}
+
+/// Linux: adds fefw.exe to Steam as a non-Steam game. Steam has to be closed for that: when it runs, the player is asked first.
+#[tauri::command]
+async fn add_to_steam(app: AppHandle) -> Result<String, String> {
+    use tauri_plugin_dialog::{MessageDialogButtons, MessageDialogKind};
+    let cfg = load_config(&app);
+    let p = paths(&cfg)?;
+    let exe = p.exe();
+    if !exe.is_file() {
+        return Err("fefw.exe is not built yet. Run Set up first.".into());
+    }
+    let close = if steam::state(&exe).running {
+        app.dialog()
+            .message("Steam saves its game list when it closes, so it has to close while the launcher adds the game. It is started again right after.")
+            .title("Add to Steam")
+            .kind(MessageDialogKind::Info)
+            .buttons(MessageDialogButtons::OkCancelCustom("Close Steam and add".into(), "Cancel".into()))
+            .blocking_show()
+    } else {
+        false
+    };
+    if steam::state(&exe).running && !close {
+        return Err("Not added: Steam is still running.".into());
+    }
+    // the upscaler DLLs next to the launcher: fefw.exe finds them by itself when the run folder is the install folder
+    let launcher_dir = (p.game_dir != exe_dir()).then(|| dump::game_path(&exe_dir()));
+    let game_dir = p.game_dir.clone();
+    // what fefw.ini points the game at, for Flatpak Steam's sandbox
+    let mut reads = vec![p.game_dir.clone(), p.romfs.clone(), p.plain_exefs(), exe_dir()];
+    reads.extend(p.dlc.clone());
+    tauri::async_runtime::spawn_blocking(move || steam::add(&exe, &game_dir, launcher_dir.as_deref(), &reads, close)).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -469,7 +526,7 @@ fn open_setup_log(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 async fn check_update(app: AppHandle) -> Result<update::Check, String> {
     // FEFW_LAUNCHER_PRETEND_VERSION: test the update path against the published release from an older-looking launcher
-    let current = std::env::var("FEFW_LAUNCHER_PRETEND_VERSION").ok().filter(|v| update::parse_version(v).is_some()).unwrap_or_else(|| app.package_info().version.to_string());
+    let current = std::env::var("FEFW_LAUNCHER_PRETEND_VERSION").ok().filter(|v| update::parse_version(v).is_some()).unwrap_or_else(|| update::BUILD_ID.map(String::from).unwrap_or_else(|| app.package_info().version.to_string()));
     let package = package_tools().is_some();
     tauri::async_runtime::spawn_blocking(move || update::check(&current, package)).await.map_err(|e| e.to_string())?
 }
@@ -493,6 +550,9 @@ fn start_update(
 ) -> Result<(), String> {
     if package_tools().is_none() {
         return Err("Updates are for the release package. In a checkout, use git.".into());
+    }
+    if release.asset_url.is_empty() {
+        return Err(format!("Release {} has no package for this system yet.", release.version));
     }
     if setup_state.progress.lock().unwrap().state == "running" {
         return Err("Setup is running. Wait for it or pause it first.".into());
@@ -536,8 +596,13 @@ fn cancel_update(state: State<Arc<update::Shared>>) {
 /// Starts the (new) launcher from the install folder and closes this one.
 #[tauri::command]
 fn restart_launcher(app: AppHandle) -> Result<(), String> {
-    let exe = exe_dir().join("fefw-launcher.exe");
-    std::process::Command::new(&exe).current_dir(exe_dir()).spawn().map_err(|e| format!("cannot start {}: {e}", exe.display()))?;
+    let exe = match std::env::var_os("APPIMAGE") {
+        Some(a) if !cfg!(windows) => PathBuf::from(a),
+        _ => exe_dir().join(if cfg!(windows) { "fefw-launcher.exe" } else { "fefw-launcher" }),
+    };
+    let mut c = std::process::Command::new(&exe);
+    setup::host_env(&mut c); // not this AppImage's environment: its mount goes away when this launcher exits
+    c.current_dir(exe_dir()).spawn().map_err(|e| format!("cannot start {}: {e}", exe.display()))?;
     app.exit(0);
     Ok(())
 }
@@ -576,6 +641,8 @@ fn main() {
             cancel_setup,
             play,
             game_status,
+            steam_status,
+            add_to_steam,
             open_game_file,
             open_game_dir,
             open_mods_dir,
