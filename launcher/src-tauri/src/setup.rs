@@ -289,7 +289,39 @@ pub fn complete(p: &Paths) -> bool {
     steps(p, None).iter().all(|s| s.state == "done")
 }
 
+/// A program started from the AppImage gets the host's environment, not the AppImage's: its AppRun points PYTHONHOME, GTK_*,
+/// GIO/GST/QT module paths and more into its temporary mount, which breaks Python programs (umu-run, Proton's script) and anything
+/// that outlives the launcher (Steam started again by Add to Steam). Variables naming the mount lose those entries (and go when
+/// nothing is left); the AppImage's own variables go. Nothing changes outside an AppImage.
+pub(crate) fn host_env(cmd: &mut Command) {
+    let vars: Vec<(String, String)> = std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?))).collect();
+    for (k, v) in appimage_fixes(&vars) {
+        match v {
+            Some(v) => cmd.env(k, v),
+            None => cmd.env_remove(k),
+        };
+    }
+}
+
+/// What host_env changes in `vars` (an environment with an AppImage's APPDIR in it): (name, new value), None removes it.
+pub(crate) fn appimage_fixes(vars: &[(String, String)]) -> Vec<(String, Option<String>)> {
+    let Some(appdir) = vars.iter().find(|(k, _)| k == "APPDIR").map(|(_, d)| d.trim_end_matches('/').to_string()).filter(|d| d.len() > 1) else {
+        return vec![];
+    };
+    let mut out = vec![];
+    for (k, v) in vars {
+        if matches!(k.as_str(), "APPDIR" | "APPIMAGE" | "ARGV0" | "OWD" | "PYTHONHOME" | "PYTHONPATH" | "PYTHONDONTWRITEBYTECODE" | "PERLLIB") {
+            out.push((k.clone(), None));
+        } else if v.contains(&appdir) {
+            let kept: Vec<&str> = v.split(':').filter(|p| !p.is_empty() && !p.contains(&appdir)).collect();
+            out.push((k.clone(), (!kept.is_empty()).then(|| kept.join(":"))));
+        }
+    }
+    out
+}
+
 pub(crate) fn quiet(cmd: &mut Command) {
+    host_env(cmd);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

@@ -225,27 +225,37 @@ fn accounts(root: &Path) -> Vec<PathBuf> {
     v
 }
 
-/// The running Steam client: its pid and command line.
-fn running() -> Option<(u32, Vec<String>)> {
+/// The running Steam client: its pid, command line and environment (to start it again exactly as it was).
+fn running() -> Option<(u32, Vec<String>, Vec<(String, String)>)> {
     for e in fs::read_dir("/proc").ok()?.flatten() {
         let Some(pid) = e.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else { continue };
         if fs::read_to_string(e.path().join("comm")).map(|c| c.trim() == "steam").unwrap_or(false) {
             let cmd = fs::read(e.path().join("cmdline")).unwrap_or_default();
             let args = cmd.split(|&b| b == 0).filter(|a| !a.is_empty()).map(|a| String::from_utf8_lossy(a).into_owned()).collect();
-            return Some((pid, args));
+            let env = fs::read(e.path().join("environ")).unwrap_or_default();
+            let env = env
+                .split(|&b| b == 0)
+                .filter_map(|kv| {
+                    let kv = String::from_utf8_lossy(kv);
+                    kv.split_once('=').filter(|(k, _)| !k.is_empty()).map(|(k, v)| (k.to_string(), v.to_string()))
+                })
+                .collect();
+            return Some((pid, args, env));
         }
     }
     None
 }
 
 fn steam_command(flatpak: bool) -> Command {
-    if flatpak {
+    let mut c = if flatpak {
         let mut c = Command::new("flatpak");
         c.args(["run", "com.valvesoftware.Steam"]);
         c
     } else {
         Command::new("steam")
-    }
+    };
+    crate::setup::host_env(&mut c);
+    c
 }
 
 #[derive(Serialize, Clone)]
@@ -300,7 +310,7 @@ pub fn add(exe: &Path, start_dir: &Path, launch_options: &str, close_steam: bool
         return Err("Steam has no signed-in account on this PC yet. Start Steam and sign in once.".into());
     }
     let mut restart = None;
-    if let Some((pid, args)) = running() {
+    if let Some((pid, args, env)) = running() {
         if !close_steam {
             return Err("Steam is running.".into());
         }
@@ -313,7 +323,7 @@ pub fn add(exe: &Path, start_dir: &Path, launch_options: &str, close_steam: bool
             std::thread::sleep(Duration::from_millis(300));
         }
         // the client's own flags (e.g. -steamdeck), not the ones its wrapper adds for itself
-        restart = Some(args.into_iter().skip(1).filter(|a| a != "-srt-logger-opened").collect::<Vec<_>>());
+        restart = Some((args.into_iter().skip(1).filter(|a| a != "-srt-logger-opened").collect::<Vec<_>>(), env));
     }
     let mut updated = 0;
     let mut result = Ok(());
@@ -327,8 +337,18 @@ pub fn add(exe: &Path, start_dir: &Path, launch_options: &str, close_steam: bool
             }
         }
     }
-    if let Some(args) = restart {
+    if let Some((args, env)) = restart {
         let mut c = steam_command(inst.flatpak);
+        // the environment it had (its session's), not the launcher's: an AppImage's would point into a mount that goes away
+        // (cleaned too: a Steam an older launcher restarted from its AppImage carries that one's mount)
+        if !env.is_empty() {
+            let fixes = crate::setup::appimage_fixes(&env);
+            let env = env.into_iter().filter_map(|(k, v)| match fixes.iter().find(|(f, _)| *f == k) {
+                Some((_, new)) => new.clone().map(|n| (k, n)),
+                None => Some((k, v)),
+            });
+            c.env_clear().envs(env);
+        }
         c.args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
         #[cfg(unix)]
         {
@@ -356,6 +376,26 @@ mod tests {
         let p = std::env::var("FEFW_TEST_SHORTCUTS").expect("set FEFW_TEST_SHORTCUTS");
         let d = fs::read(p).unwrap();
         assert_eq!(write(&parse(&d).unwrap()), d);
+    }
+
+    #[test]
+    fn appimage_variables_are_dropped() {
+        let v = |k: &str, x: &str| (k.to_string(), x.to_string());
+        let env = [
+            v("APPDIR", "/tmp/.mount_x"),
+            v("PYTHONHOME", "/tmp/.mount_x/usr/"),
+            v("XDG_DATA_DIRS", "/tmp/.mount_x/usr/share/:/usr/share:/usr/local/share"),
+            v("GTK_PATH", "/tmp/.mount_x//usr/lib/gtk-3.0"),
+            v("HOME", "/home/deck"),
+        ];
+        let f = crate::setup::appimage_fixes(&env);
+        let get = |k: &str| f.iter().find(|(n, _)| n == k).map(|(_, x)| x.clone());
+        assert_eq!(get("APPDIR"), Some(None));
+        assert_eq!(get("PYTHONHOME"), Some(None));
+        assert_eq!(get("GTK_PATH"), Some(None));
+        assert_eq!(get("XDG_DATA_DIRS"), Some(Some("/usr/share:/usr/local/share".into())));
+        assert_eq!(get("HOME"), None);
+        assert!(crate::setup::appimage_fixes(&env[1..]).is_empty());
     }
 
     #[test]

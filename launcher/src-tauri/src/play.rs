@@ -103,6 +103,7 @@ pub fn start(app: &AppHandle, exe: &Path, game_dir: &Path, minimize: bool, runne
                 c
             }
         };
+        crate::setup::host_env(&mut cmd);
         // fefw.exe reads fefw.ini from its working directory: every path comes from there
         cmd.current_dir(&dir);
         // the upscaler DLLs ship next to the launcher (upscalers/fsr, upscalers/streamline), which need not be the run folder
@@ -155,7 +156,9 @@ pub fn start(app: &AppHandle, exe: &Path, game_dir: &Path, minimize: bool, runne
 }
 
 pub fn open_with_shell(path: &Path) -> Result<(), String> {
-    Command::new(if cfg!(windows) { "explorer.exe" } else { "xdg-open" }).arg(path).spawn().map(|_| ()).map_err(|e| format!("Could not open {}: {}", path.display(), e))
+    let mut c = Command::new(if cfg!(windows) { "explorer.exe" } else { "xdg-open" });
+    crate::setup::host_env(&mut c);
+    c.arg(path).spawn().map(|_| ()).map_err(|e| format!("Could not open {}: {}", path.display(), e))
 }
 
 #[cfg(test)]
