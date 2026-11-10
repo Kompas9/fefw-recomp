@@ -71,11 +71,13 @@ folder: `sl.dlss_g.dll`, `sl.reflex.dll`, `sl.pcl.dll`, `nvngx_dlssg.dll` and `N
 
 ### FSR 3 (any GPU)
 
-AMD's signed FSR files come with the release, in `upscalers\fsr` next to `fefw-launcher.exe`, so nothing needs downloading:
+FSR 3 needs AMD's signed FidelityFX files, which you download from AMD's
+[FidelityFX SDK](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK) repository. Put them in `upscalers\fsr` next to
+`fefw-launcher.exe` (create the folder):
 
 ```
-amd_fidelityfx_upscaler_vk.dll   amd_fidelityfx_loader_vk.dll   FSR 3 upscaling (FSR SDK v2.4.0; FSR 4 where AMD offers it)
-amd_fidelityfx_vk.dll                                            FSR 3 frame generation (FidelityFX SDK v1.1.4)
+amd_fidelityfx_upscaler_vk.dll   amd_fidelityfx_loader_vk.dll   FSR 3 upscaling (Kits/FidelityFX/signedbin of tag v2.4.0)
+amd_fidelityfx_vk.dll                                            FSR 3 frame generation (PrebuiltSignedDLL of tag v1.1.4)
 ```
 
 Choose **AMD FSR 3 upscaling** as the Upscaler and/or **AMD FSR 3 frame generation** under **Settings > Frame rate**, then restart
@@ -202,8 +204,8 @@ This project stands on the work of others. Thank you.
   Vulkan-Headers (Apache-2.0 or MIT).
 - [astc-encoder](https://github.com/ARM-software/astc-encoder) (Apache-2.0), [bc7enc_rdo](https://github.com/richgel999/bc7enc_rdo)
   (MIT or public domain), ISPC (BSD-3-Clause).
-- AMD FidelityFX / FSR SDK headers, FSR and AMD's signed FSR DLLs in `upscalers\fsr` (MIT; `licenses\LICENSE.AMD-*`),
-  NVIDIA Image Scaling (MIT), NVIDIA Streamline headers (MIT). No NVIDIA binaries are included; DLSS is not distributed.
+- AMD FidelityFX / FSR SDK headers (MIT), NVIDIA Image Scaling (MIT), NVIDIA Streamline headers (MIT). No AMD or NVIDIA binaries
+  are included; FSR and DLSS files are not distributed.
 - [Sascha Willems' Vulkan samples](https://github.com/SaschaWillems/Vulkan) (MIT): the stand-in shader test corpus.
 - [Kenney input prompts](https://kenney.nl/assets/input-prompts) (CC0), DejaVu fonts, [Tauri](https://tauri.app), [Lucide](https://lucide.dev) icons (ISC).
 

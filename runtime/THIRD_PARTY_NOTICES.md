@@ -253,18 +253,13 @@ Files: `third_party/nvidia_nis/` (`NIS_Scaler.h`, `NIS_Config.h`, unmodified). C
 
 Files: `third_party/amd_ffx_api/` (`api/include/ffx_api.h`, `ffx_api_types.h`, `ffx_api_loader.h`, `vk/ffx_api_vk.h`, `upscalers/include/ffx_upscale.h`, unmodified). Copyright (c) Advanced Micro Devices, Inc. Licence text: `third_party/amd_ffx_api/LICENSE.txt`. Source: https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK, release v2.4.0. Used by `src/gfx/extras/temporal_ffx.cpp`.
 
-## AMD FidelityFX / FSR runtime DLLs (MIT, shipped in the release package)
+## AMD FidelityFX / FSR runtime DLLs (MIT)
 
-Not in this repository; `game-build/scripts/make-release.ps1` downloads them from AMD's FidelityFX SDK repository at pinned tags, checks
-their sha256 and AMD's Authenticode signature, and puts them in `upscalers/fsr/` of the release package. The game loads them at run time
-(`LoadLibrary`, `src/gfx/extras/ffx_files.cpp`). Copyright (C) Advanced Micro Devices, Inc.
-
-- `amd_fidelityfx_loader_vk.dll` (1.0.2.4555) and `amd_fidelityfx_upscaler_vk.dll` (4.1.2.4555): `Kits/FidelityFX/signedbin/` of the FSR
-  SDK tag v2.4.0. The SDK's `Kits/FidelityFX/docs/license.md` puts every file it does not list under an AMD binary-only licence, and
-  lists these two (with the other `signedbin` files) among the files under the MIT licence; that file is
-  `licenses/LICENSE.AMD-FSR-SDK-v2.4.0.md` in the release.
-- `amd_fidelityfx_vk.dll` (1.0.1.41314): `PrebuiltSignedDLL/` of the FidelityFX SDK tag v1.1.4, whose `LICENSE.txt` (MIT, the whole
-  repository) is `licenses/LICENSE.AMD-FidelityFX-SDK-v1.1.4.txt` in the release.
+`amd_fidelityfx_loader_vk.dll` and `amd_fidelityfx_upscaler_vk.dll` (AMD-signed, `Kits/FidelityFX/signedbin/` of the FSR SDK v2.4.0,
+whose `Kits/FidelityFX/docs/license.md` lists them under MIT) and `amd_fidelityfx_vk.dll` (`PrebuiltSignedDLL/` of the FidelityFX SDK
+v1.1.4, MIT) are not in this repository or the release package. The game loads them at run time only (`LoadLibrary`,
+`src/gfx/extras/ffx_files.cpp`) if the player puts them in `upscalers/fsr/` or names the folder with `[upscale] fsr_dll`.
+Copyright (C) Advanced Micro Devices, Inc.
 
 ## NVIDIA Streamline SDK v2.14.16 headers (MIT)
 
