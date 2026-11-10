@@ -21,6 +21,7 @@
 // buffers (2 by default, 0x1903ae0), then registers 4 and the third is missing: the site at 0x1906634 sets the count first. nxnative-penis6's
 // patches.py makes the same two changes in the code.
 #include "fefw_game.h"
+#include "play_types.h"
 
 #include <algorithm>
 #include <atomic>
@@ -255,7 +256,7 @@ void exit_writing_profile(int code) {
 
 }  // namespace
 
-void play_install(uint64_t base, play::GameHost*, const play::Settings&) {
+void play_install(uint64_t base, play::GameHost*, const play::Settings& settings) {
     State& s = st();
     int (*volatile write_profile)(void) = &__llvm_profile_write_file;
     if (write_profile != &nxrt_no_profile_write) tt::set_exit_handler(&exit_writing_profile);
@@ -289,6 +290,10 @@ void play_install(uint64_t base, play::GameHost*, const play::Settings&) {
     NXLOG_I(kTag, "gameplay at %s fps ([fefw] fps60 = %d, fps120 = %d, smooth_step = %d), game clock log every %lld s",
             s.fps120 ? "120" : s.fps60 ? "60" : "30 (the game's own)", s.fps60 ? 1 : 0, s.fps120 ? 1 : 0, smooth ? 1 : 0,
             static_cast<long long>(period));
+    // [display] fps_limit (0 unlimited, -1 auto) below 120 holds fps120 at the limit: the game then steps whole frames at that rate (#25)
+    const int cap = settings.display.fps_cap;
+    if (s.fps120 && cap > 0 && cap < 120)
+        NXLOG_W(kTag, "fps120 is on but [display] fps_limit is %d: presenting at %d fps (set it to 0, auto or at least 120)", cap, cap);
 }
 
 ClockInfo clock_info() {
