@@ -62,8 +62,10 @@ function updateCard(cfg) {
       ${r.notes ? `<div class="notes">${notesHtml(r.notes)}</div>` : ''}
       ${r.page ? `<p class="faint">${esc(t('about.fullNotes'))}${esc(r.page)}</p>` : ''}
       ${s.state === 'error' ? `<div class="banner danger">${icon('circle-x')}<div>${esc(updMessage(s.message))}</div></div>` : ''}
-      <p class="faint">${esc(t('about.downloadHint'))}</p>
-      <div class="row"><button class="btn primary" id="update">${icon('download')}${esc(t('about.updateTo', { version: r.version }))}</button></div>`;
+      ${r.asset_url
+        ? `<p class="faint">${esc(t('about.downloadHint'))}</p>
+      <div class="row"><button class="btn primary" id="update">${icon('download')}${esc(t('about.updateTo', { version: r.version }))}</button></div>`
+        : `<div class="banner info">${icon('info')}<div>${esc(t('about.noPackage'))}</div></div>`}`;
   } else {
     const line = upd.checking
       ? `${icon('loader-circle', 'spin')} ${esc(t('about.checking'))}`

@@ -135,7 +135,7 @@ mkdir -p "$check"
 (cd "$check" && "$PKG/fefw-launcher.AppImage" --appimage-extract >/dev/null)
 leaks=""
 for n in "$HOME" "$ROOT"; do
-    [ ${#n} -ge 8 ] || continue
+    [ ${#n} -ge 8 ] || { echo "(the path check skips $n: too short to search for)"; continue; }
     leaks+="$(grep -rl --binary-files=text -F "$n" "$PKG" "$check" || true)"$'\n'
 done
 rm -rf "$check"

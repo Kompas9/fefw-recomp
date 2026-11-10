@@ -468,7 +468,10 @@ async fn add_to_steam(app: AppHandle) -> Result<String, String> {
     // the upscaler DLLs next to the launcher: fefw.exe finds them by itself when the run folder is the install folder
     let launcher_dir = (p.game_dir != exe_dir()).then(|| dump::game_path(&exe_dir()));
     let game_dir = p.game_dir.clone();
-    tauri::async_runtime::spawn_blocking(move || steam::add(&exe, &game_dir, launcher_dir.as_deref(), close)).await.map_err(|e| e.to_string())?
+    // what fefw.ini points the game at, for Flatpak Steam's sandbox
+    let mut reads = vec![p.game_dir.clone(), p.romfs.clone(), p.plain_exefs(), exe_dir()];
+    reads.extend(p.dlc.clone());
+    tauri::async_runtime::spawn_blocking(move || steam::add(&exe, &game_dir, launcher_dir.as_deref(), &reads, close)).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -545,6 +548,9 @@ fn start_update(
     if package_tools().is_none() {
         return Err("Updates are for the release package. In a checkout, use git.".into());
     }
+    if release.asset_url.is_empty() {
+        return Err(format!("Release {} has no package for this system yet.", release.version));
+    }
     if setup_state.progress.lock().unwrap().state == "running" {
         return Err("Setup is running. Wait for it or pause it first.".into());
     }
@@ -591,7 +597,9 @@ fn restart_launcher(app: AppHandle) -> Result<(), String> {
         Some(a) if !cfg!(windows) => PathBuf::from(a),
         _ => exe_dir().join(if cfg!(windows) { "fefw-launcher.exe" } else { "fefw-launcher" }),
     };
-    std::process::Command::new(&exe).current_dir(exe_dir()).spawn().map_err(|e| format!("cannot start {}: {e}", exe.display()))?;
+    let mut c = std::process::Command::new(&exe);
+    setup::host_env(&mut c); // not this AppImage's environment: its mount goes away when this launcher exits
+    c.current_dir(exe_dir()).spawn().map_err(|e| format!("cannot start {}: {e}", exe.display()))?;
     app.exit(0);
     Ok(())
 }

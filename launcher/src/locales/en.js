@@ -327,6 +327,7 @@ export const en = {
     'about.available': 'Version {version} is available',
     'about.availableMeta': '(you have {current}, download {size} MiB)',
     'about.fullNotes': 'Full notes: ',
+    'about.noPackage': 'This release has no package for this system yet, so the launcher cannot install it. Watch its release page.',
     'about.downloadHint': 'The launcher downloads and checks the new version, then asks to restart. Your saves, settings and built game stay.',
     'about.updateTo': 'Update to {version}',
     'about.checkNow': 'Check now',

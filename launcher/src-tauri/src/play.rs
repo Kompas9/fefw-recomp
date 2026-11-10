@@ -75,7 +75,8 @@ pub fn runner(custom: &str) -> Result<Vec<String>, String> {
         .into())
 }
 
-/// Shell-like words: spaces separate them, "..." and '...' group them, a backslash outside '...' takes the next character as is.
+/// Shell-like words: spaces separate them, "..." and '...' group them, a backslash outside quotes takes the next character as is
+/// (inside "..." only before " \\ $ `, as in a shell).
 fn words(s: &str) -> Vec<String> {
     let (mut out, mut cur, mut any) = (Vec::new(), String::new(), false);
     let mut quote: Option<char> = None;
@@ -84,9 +85,14 @@ fn words(s: &str) -> Vec<String> {
         match (quote, c) {
             (Some(q), c) if c == q => quote = None,
             (Some('\''), c) => cur.push(c),
-            (_, '\\') => {
-                if let Some(n) = it.next() {
-                    cur.push(n);
+            (q, '\\') => {
+                match it.next() {
+                    Some(n) if q.is_none() || matches!(n, '"' | '\\' | '$' | '`') => cur.push(n),
+                    Some(n) => {
+                        cur.push('\\');
+                        cur.push(n);
+                    }
+                    None => cur.push('\\'),
                 }
                 any = true;
             }
@@ -110,12 +116,20 @@ fn words(s: &str) -> Vec<String> {
     out
 }
 
-/// Whether the runner is umu-run, also behind `env VAR=...`.
+/// Whether the runner is umu-run, also behind `env [-u NAME] VAR=...`.
 fn is_umu(runner: &[String]) -> bool {
-    runner
-        .iter()
-        .find(|w| *w != "env" && !w.contains('='))
-        .is_some_and(|p| Path::new(p).file_name().is_some_and(|n| n == "umu-run"))
+    let mut it = runner.iter();
+    let mut in_env = false;
+    while let Some(w) = it.next() {
+        if !in_env && w == "env" {
+            in_env = true;
+        } else if in_env && (w == "-u" || w == "--unset") {
+            it.next(); // the name it unsets
+        } else if !(in_env && w.starts_with('-')) && !w.contains('=') {
+            return Path::new(w).file_name().is_some_and(|n| n == "umu-run");
+        }
+    }
+    false
 }
 
 fn on_path(name: &str) -> bool {
@@ -137,19 +151,23 @@ pub fn start(app: &AppHandle, exe: &Path, game_dir: &Path, launcher_dir: &Path, 
     let launcher_dir = launcher_dir.to_path_buf();
     set_status(app, Status { state: "running".into(), message: "Starting fefw.exe...".into(), ..Default::default() });
     std::thread::spawn(move || {
-        let mut cmd = match runner.split_first() {
+        // leading NAME=value words are environment variables, as in a shell (there is none in between here)
+        let n = runner.iter().take_while(|w| w.split_once('=').is_some_and(|(k, _)| !k.is_empty() && !k.contains('/'))).count();
+        let (assign, words) = runner.split_at(n);
+        let mut cmd = match words.split_first() {
             None => Command::new(&exe),
             Some((prog, args)) => {
                 let mut c = Command::new(prog);
                 c.args(args).arg(&exe);
-                // umu-run wants a game id (it picks protonfixes for known games from it); "0" is the generic one its README uses
-                if is_umu(&runner) && std::env::var_os("GAMEID").is_none() {
-                    c.env("GAMEID", "0");
-                }
                 c
             }
         };
         crate::setup::host_env(&mut cmd);
+        cmd.envs(assign.iter().filter_map(|w| w.split_once('=')));
+        // umu-run wants a game id (it picks protonfixes for known games from it); "0" is the generic one its README uses
+        if is_umu(&runner) && std::env::var_os("GAMEID").is_none() && !assign.iter().any(|w| w.starts_with("GAMEID=")) {
+            cmd.env("GAMEID", "0");
+        }
         // fefw.exe reads fefw.ini from its working directory: every path comes from there
         cmd.current_dir(&dir);
         // the upscaler DLLs ship next to the launcher (upscalers/fsr, upscalers/streamline), which need not be the run folder
@@ -223,6 +241,9 @@ mod tests {
             assert_eq!(runner(r#""/s/Proton - Experimental/proton" run"#).unwrap(), ["/s/Proton - Experimental/proton", "run"]);
             assert_eq!(runner(r"/a\ b/wine '' x").unwrap(), ["/a b/wine", "", "x"]);
             assert!(is_umu(&words("env GAMEID=1 /usr/bin/umu-run")));
+            assert!(is_umu(&words("env -u WINEPREFIX -i umu-run")));
+            assert!(is_umu(&words("PROTONPATH=/p umu-run")));
+            assert_eq!(words(r#""C:\games" "a\"b""#), [r"C:\games", r#"a"b"#]);
             assert!(!is_umu(&words("wine")));
         }
     }

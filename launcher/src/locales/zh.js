@@ -311,6 +311,7 @@ export const zh = {
     'about.available': '有可用版本 {version}',
     'about.availableMeta': '（当前 {current}，需下载 {size} MiB）',
     'about.fullNotes': '完整说明：',
+    'about.noPackage': '此版本还没有适用于本系统的安装包，启动器无法安装。请关注它的发布页面。',
     'about.downloadHint': '启动器会下载并校验新版本，然后请求重启。你的存档、设置与已构建的游戏都会保留。',
     'about.updateTo': '更新到 {version}',
     'about.checkNow': '立即检查',

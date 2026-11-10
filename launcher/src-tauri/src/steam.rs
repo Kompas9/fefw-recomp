@@ -4,8 +4,8 @@
 //!
 //! Steam keeps shortcuts.vdf in memory and writes it back when it exits, so the file is only changed while Steam is closed: a
 //! running Steam is asked to shut down first (and started again afterwards with the same command line). The file is binary
-//! KeyValues; it is only rewritten when parsing and writing it back gives the same bytes, and the previous copy is kept as
-//! shortcuts.vdf.fefw-backup.
+//! KeyValues; it is only rewritten when parsing and writing it back gives the same bytes, and the file as it was before the
+//! launcher first changed it is kept as shortcuts.vdf.fefw-backup.
 
 use serde::Serialize;
 use std::fs;
@@ -337,7 +337,8 @@ fn update_file(path: &Path, exe: &Path, start_dir: &Path, launcher_dir: Option<&
 }
 
 /// Adds fefw.exe to every Steam account on this PC. `close_steam`: a running Steam may be shut down (and is started again).
-pub fn add(exe: &Path, start_dir: &Path, launcher_dir: Option<&str>, close_steam: bool) -> Result<String, String> {
+/// `reads`: the folders the game reads (the run folder, the dump, the package), named for Flatpak Steam's sandbox.
+pub fn add(exe: &Path, start_dir: &Path, launcher_dir: Option<&str>, reads: &[PathBuf], close_steam: bool) -> Result<String, String> {
     if !cfg!(target_os = "linux") {
         return Err("Add to Steam is for Linux, where Steam runs fefw.exe with Proton.".into());
     }
@@ -378,8 +379,9 @@ pub fn add(exe: &Path, start_dir: &Path, launcher_dir: Option<&str>, close_steam
     if let Some((args, env)) = restart {
         let mut c = steam_command(inst.flatpak);
         // the environment it had (its session's), not the launcher's: an AppImage's would point into a mount that goes away
-        // (cleaned too: a Steam an older launcher restarted from its AppImage carries that one's mount)
-        if !env.is_empty() {
+        // (cleaned too: a Steam an older launcher restarted from its AppImage carries that one's mount). Not for Flatpak Steam:
+        // the client found in /proc runs inside the sandbox, and its environment does not fit `flatpak run` on the host.
+        if !env.is_empty() && !inst.flatpak {
             let fixes = crate::setup::appimage_fixes(&env);
             let env = env.into_iter().filter_map(|(k, v)| match fixes.iter().find(|(f, _)| *f == k) {
                 Some((_, new)) => new.clone().map(|n| (k, n)),
@@ -406,12 +408,16 @@ pub fn add(exe: &Path, start_dir: &Path, launcher_dir: Option<&str>, close_steam
         format!("Added to Steam as \"{APP_NAME}\". Steam runs it with Proton.")
     };
     if inst.flatpak {
-        // the Flatpak's sandbox sees only its own folders unless it is given more
-        let dir = exe.parent().unwrap_or(start_dir);
-        msg += &format!(
-            " Flatpak Steam cannot open this folder by itself: run flatpak override --user --filesystem=\"{}\" com.valvesoftware.Steam",
-            dir.display()
-        );
+        // the Flatpak's sandbox sees only its own folders unless it is given more: every folder the game reads, once each
+        let mut dirs: Vec<&Path> = vec![];
+        for d in reads.iter().map(PathBuf::as_path).chain([start_dir]) {
+            if !dirs.iter().any(|k| d.starts_with(k)) {
+                dirs.retain(|k| !k.starts_with(d));
+                dirs.push(d);
+            }
+        }
+        let args: Vec<String> = dirs.iter().map(|d| format!("--filesystem=\"{}\"", d.display())).collect();
+        msg += &format!(" Flatpak Steam cannot open these folders by itself: run flatpak override --user {} com.valvesoftware.Steam", args.join(" "));
     }
     Ok(msg)
 }
