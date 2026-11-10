@@ -182,7 +182,11 @@ void widen_pane(uint64_t pane, uint64_t info) {
     if (!(m00 > 0.0f) || m01 != 0.0f || !(pw > 0.0f)) return;
     const int hpos = rdv<uint8_t>(pane + kPaneBase) & 3;
     const float left = m03 + m00 * (hpos == 1 ? 0.0f : hpos == 2 ? -pw : -0.5f * pw), right = left + m00 * pw;
-    const bool at_left = left <= -958.0f, at_right = right >= 958.0f;
+    // Full-width backdrops may zoom beyond both edges. A single-edge pane must
+    // meet the edge, so the oversized, clipped minimap image is not stretched.
+    const bool covers_width = left <= -958.0f && right >= 958.0f;
+    const bool at_left = covers_width || std::fabs(left + 960.0f) <= 2.0f;
+    const bool at_right = covers_width || std::fabs(right - 960.0f) <= 2.0f;
     if (!at_left && !at_right) return;
     // x' = a x + b in layout units: a full-width pane scales about the centre; a full-height one on one edge reaches the output's edge there
     float a = w.k, b = 0.0f;
