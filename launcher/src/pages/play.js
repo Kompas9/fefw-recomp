@@ -1,6 +1,6 @@
 import { api, esc, icon, refreshIcons, toast, errText } from '../util.js';
 import { t } from '../i18n.js';
-import { statusText } from '../rusttext.js';
+import { statusText, stepTitle } from '../rusttext.js';
 
 const hex = (c) => '0x' + (c >>> 0).toString(16).toUpperCase().padStart(8, '0');
 
@@ -46,7 +46,7 @@ export async function render(el, ctx) {
     else if (!chosen) problems.push(t('play.problemBadDump', { path: cfg.dump_dir, errors: report.errors.join(' ') }));
     else if (!setup.complete) problems.push(t(setup.progress.state === 'running' ? 'play.problemSetupRunning' : 'play.problemSetupUnfinished'));
     const ready = problems.length === 0;
-    const left = setup ? setup.steps.filter((x) => x.state !== 'done').map((x) => x.title) : [];
+    const left = setup ? setup.steps.filter((x) => x.state !== 'done').map((x) => stepTitle(x)) : [];
 
     el.innerHTML = `
       <div class="page">

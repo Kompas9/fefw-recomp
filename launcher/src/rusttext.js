@@ -74,3 +74,50 @@ export function updText(s) {
   if (inst) return t('about.installed', { version: inst[1] });
   return m;
 }
+
+/** A build prerequisite setup.rs lists (`check_tools`): the name and the hint are written in English there. */
+const TOOLS = {
+  'Visual Studio C++ tools': 'visualStudio',
+  'LLVM (clang-cl)': 'llvm',
+  CMake: 'cmake',
+  Ninja: 'ninja',
+  'uv (Python)': 'uv',
+  '.NET SDK': 'dotnet',
+  Git: 'git',
+};
+export function toolText(name) {
+  const id = TOOLS[name];
+  return id ? t(`setup.tool.${id}`) : name;
+}
+const TOOL_HINTS = {
+  'Visual Studio 2022 Build Tools or newer with "Desktop development with C++".': 'visualStudio',
+  'LLVM 23 or newer from github.com/llvm/llvm-project/releases (or set NX_LLVM to its bin folder, or NX_TOOLCHAIN to a folder with llvm\\bin).': 'llvm',
+  'CMake 3.25 or newer (winget install Kitware.CMake).': 'cmake',
+  'winget install Ninja-build.Ninja': 'ninja',
+  'winget install astral-sh.uv': 'uv',
+  '.NET 10 SDK (winget install Microsoft.DotNet.SDK.10).': 'dotnet',
+  "winget install Git.Git (fetches the shader translator's sources).": 'git',
+};
+export function toolHint(hint) {
+  const id = TOOL_HINTS[hint];
+  return id ? t(`setup.tool.${id}.hint`) : hint;
+}
+
+/** The sentence `upscaler_files` (main.rs) builds around the folders it searched. */
+const WHAT = {
+  'amd_fidelityfx_upscaler_vk.dll': 'settings.files.whatUpscaler',
+  'amd_fidelityfx_vk.dll (FidelityFX SDK v1.1.4)': 'settings.files.whatFfx',
+  'the Streamline files': 'settings.files.whatStreamline',
+  'the Streamline frame generation files': 'settings.files.whatStreamlineFg',
+};
+export function fileDetail(d) {
+  const s = String(d || '');
+  let m = /^(.+) lacks (.+)$/.exec(s);
+  if (m) return t('settings.files.lacks', { path: m[1], files: m[2] });
+  m = /^(.+?) not found in (.+)$/.exec(s);
+  if (m) {
+    const what = WHAT[m[1]] ? t(WHAT[m[1]]) : m[1];
+    return t('settings.files.missingIn', { what, dirs: m[2] });
+  }
+  return s;
+}
