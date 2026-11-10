@@ -33,6 +33,7 @@
 #include "nxrt/nvn.h"
 #include "nxrt/platform.h"
 #include "nxrt/services_api.h"
+#include "extras/framegen.h"
 #include "extras/overlay_composite.h"
 #include "fps_stats.h"
 
@@ -234,7 +235,7 @@ struct Overlay::Impl {
     FpsStats stats;
     double text_s = -1e9;                 // time of the last text refresh, seconds (far past: refresh at once)
     FpsStats::Snapshot snap;              // the snapshot taken at text_s
-    std::string counter_lines[4];
+    std::string counter_lines[5];
     int counter_n = 0;
 
     void build_ui();
@@ -1028,19 +1029,28 @@ void Overlay::Impl::refresh_counter_text(double now_s) {
     const int detail = counter_detail.load(std::memory_order_relaxed);
     char buf[64];
     counter_n = 0;
-    if (snap.valid) std::snprintf(buf, sizeof buf, "%.0f FPS", snap.fps);
+    // With frame generation the frames that reach the screen: this counter sees the game's own frames only, the generated ones are made
+    // after it. The most detailed view adds the game's own rate, and its 1% low and worst frame (measured on the game's frames) say so.
+    const float ratio = extras::framegen_shown_ratio();
+    const double shown = ratio > 1.05f ? ratio : 1.0;
+    const char* real = shown > 1.0 ? "real " : "";
+    if (snap.valid) std::snprintf(buf, sizeof buf, "%.0f FPS", snap.fps * shown);
     else std::snprintf(buf, sizeof buf, "-- FPS");
     counter_lines[counter_n++] = buf;
     if (detail >= 1) {
-        if (snap.valid) std::snprintf(buf, sizeof buf, "%.1f ms", snap.avg_ms);
+        if (snap.valid) std::snprintf(buf, sizeof buf, "%.1f ms", snap.avg_ms / shown);
         else std::snprintf(buf, sizeof buf, "-- ms");
         counter_lines[counter_n++] = buf;
     }
+    if (detail >= 2 && shown > 1.0 && snap.valid) {
+        std::snprintf(buf, sizeof buf, "%.0f real", snap.fps);
+        counter_lines[counter_n++] = buf;
+    }
     if (detail >= 2) {
-        if (snap.valid) std::snprintf(buf, sizeof buf, "1%% low %.0f", snap.low1_fps);
+        if (snap.valid) std::snprintf(buf, sizeof buf, "%s1%% low %.0f", real, snap.low1_fps);
         else std::snprintf(buf, sizeof buf, "1%% low --");
         counter_lines[counter_n++] = buf;
-        if (snap.valid) std::snprintf(buf, sizeof buf, "max %.1f ms", snap.max_ms);
+        if (snap.valid) std::snprintf(buf, sizeof buf, "%smax %.1f ms", real, snap.max_ms);
         else std::snprintf(buf, sizeof buf, "max -- ms");
         counter_lines[counter_n++] = buf;
     }

@@ -44,6 +44,9 @@ void framegen_present_begin(VkCommandBuffer cb, VkExtent2D backbuffer, VkExtent2
 void framegen_present_end();
 void framegen_swapchain_reset();   // renderer is idle, before replacing/destroying a swapchain
 void framegen_shutdown(void* gfx_device);
+// Shown frames per game frame over the last 2 s report (DLSS-G or FSR 3), 0 while generation was on for less than half of them: the
+// frame rate counter multiplies the game's frame rate by it. Any thread.
+float framegen_shown_ratio();
 
 // sl.interposer.dll's export `name` (temporal_dlss.cpp); null when Streamline was not started.
 void* streamline_proc(const char* name);
