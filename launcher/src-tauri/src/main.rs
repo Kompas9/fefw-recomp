@@ -5,6 +5,7 @@
 
 mod dump;
 mod ini;
+mod locale;
 mod nup;
 mod play;
 mod settings;
@@ -35,6 +36,8 @@ struct Config {
     minimize_on_play: bool,
     /// do not ask GitHub for a newer release when the launcher starts
     skip_update_check: bool,
+    /// The launcher's own interface language ("en", "zh", or the code of a language pack in locales/). Empty: English.
+    lang: String,
 }
 
 fn config_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -495,6 +498,8 @@ fn main() {
             start_update,
             cancel_update,
             restart_launcher,
+            locale::list_locales,
+            locale::read_locale,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the launcher");

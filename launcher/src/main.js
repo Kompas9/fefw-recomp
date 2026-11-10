@@ -2,7 +2,8 @@ import './theme.css';
 import './layout.css';
 import './components.css';
 import { listen } from '@tauri-apps/api/event';
-import { api, icon, refreshIcons, errText, toast } from './util.js';
+import { api, esc, icon, refreshIcons, errText, toast } from './util.js';
+import { t, initLang, getLang } from './i18n.js';
 import * as play from './pages/play.js';
 import * as settings from './pages/settings.js';
 import * as setup from './pages/setup.js';
@@ -10,10 +11,10 @@ import * as about from './pages/about.js';
 import { upd, notify, checkNow, available } from './update.js';
 
 const PAGES = {
-  play: { mod: play, label: 'Play', icon: 'play' },
-  setup: { mod: setup, label: 'Setup', icon: 'hammer' },
-  settings: { mod: settings, label: 'Settings', icon: 'settings' },
-  about: { mod: about, label: 'About', icon: 'info' },
+  play: { mod: play, key: 'nav.play', icon: 'play' },
+  setup: { mod: setup, key: 'nav.setup', icon: 'hammer' },
+  settings: { mod: settings, key: 'nav.settings', icon: 'settings' },
+  about: { mod: about, key: 'nav.about', icon: 'info' },
 };
 
 const nav = document.getElementById('nav');
@@ -28,21 +29,38 @@ const ctx = {
   onStatus(fn) { statusHandler = fn; },
   onSetup(fn) { setupHandler = fn; },
   onLog(fn) { logHandler = fn; },
+  /** Repaints the surrounding chrome only: window title, nav labels, language attribute. The open page keeps its state. */
+  shell() { drawShell(); },
+  /** Repaints the chrome and renders the open page again from disk. */
+  redraw() { redrawForLang(); },
 };
 
 function drawNav() {
   nav.innerHTML =
-    `<div class="brand"><img class="mark" src="/icon.png" alt=""><span class="name">fefw recomp</span></div>` +
+    `<div class="brand"><img class="mark" src="/icon.png" alt=""><span class="name">${esc(t('brand.name'))}</span></div>` +
     Object.entries(PAGES)
-      .map(([id, p]) => `<button class="nav-item ${id === current ? 'active' : ''}" data-page="${id}">${icon(p.icon)}<span class="label">${p.label}</span></button>`)
+      .map(([id, p]) => `<button class="nav-item ${id === current ? 'active' : ''}" data-page="${id}">${icon(p.icon)}<span class="label">${esc(t(p.key))}</span></button>`)
       .join('') +
     (available() || upd.status.state === 'done'
-      ? `<button class="nav-item update-pill" data-page="about">${icon('circle-arrow-up')}<span class="label">${
-          upd.status.state === 'done' ? 'Restart to update' : `Update to ${upd.check.latest.version}`
-        }</span></button>`
+      ? `<button class="nav-item update-pill" data-page="about">${icon('circle-arrow-up')}<span class="label">${esc(
+          upd.status.state === 'done' ? t('nav.restartUpdate') : t('nav.updateTo', { version: upd.check.latest.version }),
+        )}</span></button>`
       : '');
   nav.querySelectorAll('[data-page]').forEach((b) => b.addEventListener('click', () => go(b.dataset.page)));
   refreshIcons();
+}
+
+/** Repaints the chrome. Translations come from a language pack, so they are escaped like any other text. */
+function drawShell() {
+  document.title = t('window.title');
+  nav.setAttribute('aria-label', t('nav.main'));
+  drawNav();
+}
+
+/** Redraws the shell and the open page after the interface language changed. */
+function redrawForLang() {
+  drawShell();
+  if (current) go(current);
 }
 
 async function go(page, opts = {}) {
@@ -76,9 +94,13 @@ async function boot() {
   } catch (e) {
     toast(errText(e), 'error');
   }
+  await initLang(() => redrawForLang(), cfg.lang);
+  drawShell();
   // first run: no game files chosen yet
   go(cfg.dump_dir ? 'play' : 'setup', { firstRun: !cfg.dump_dir });
   if (!cfg.skip_update_check) checkNow(); // quietly: a failure only shows on the About page
 }
 
 boot();
+
+export { redrawForLang, getLang };

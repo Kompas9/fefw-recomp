@@ -1,27 +1,32 @@
 import { api, esc, icon, refreshIcons, toast, errText } from '../util.js';
+import { t } from '../i18n.js';
+import { statusText } from '../rusttext.js';
 
 const hex = (c) => '0x' + (c >>> 0).toString(16).toUpperCase().padStart(8, '0');
 
 function statusChip(s) {
-  if (s.state === 'running') return `<span class="chip warn">${icon('loader-circle', 'spin')}Running</span>`;
+  if (s.state === 'running') return `<span class="chip warn">${icon('loader-circle', 'spin')}${esc(t('play.running'))}</span>`;
   if (s.state === 'exited') {
-    const code = s.code === null || s.code === undefined ? 'no exit code' : `code ${s.code} (${hex(s.code)})`;
+    const code = s.code === null || s.code === undefined ? t('play.noExitCode') : t('play.codeWithHex', { code: s.code, hex: hex(s.code) });
     return s.crashed
-      ? `<span class="chip danger">${icon('circle-alert')}Stopped abnormally, ${esc(code)}</span>`
-      : `<span class="chip ok">${icon('circle-check')}Exited, ${esc(code)}</span>`;
+      ? `<span class="chip danger">${icon('circle-alert')}${esc(t('play.crashed', { code }))}</span>`
+      : `<span class="chip ok">${icon('circle-check')}${esc(t('play.exited', { code }))}</span>`;
   }
-  return '<span class="chip">Ready</span>';
+  return `<span class="chip">${esc(t('play.ready'))}</span>`;
 }
+
+/* The line a run ends with comes from play.rs in English; rusttext.js translates it. */
+const statusMsg = (s) => statusText(s);
 
 function reportHtml(s) {
   if (s.state !== 'exited') return '';
   const files = s.files.filter((f) => s.crashed || f.name === 'fefw.log');
   return `
     <div class="card">
-      <h2>${icon(s.crashed ? 'circle-alert' : 'file-text')}${s.crashed ? 'The game did not end cleanly' : 'Last run'}</h2>
-      <p class="dim">${esc(s.message)}</p>
+      <h2>${icon(s.crashed ? 'circle-alert' : 'file-text')}${esc(t(s.crashed ? 'play.reportCrashed' : 'play.reportClean'))}</h2>
+      <p class="dim">${esc(statusMsg(s))}</p>
       ${files.length ? `<div class="row wrap" style="margin-top: var(--space-4)">${files
-        .map((f) => `<button class="btn" data-open="${esc(f.name)}">${icon('file-text')}${esc(f.name)}${f.fresh && f.name !== 'fefw.log' ? ' (new)' : ''}</button>`)
+        .map((f) => `<button class="btn" data-open="${esc(f.name)}">${icon('file-text')}${esc(f.name)}${f.fresh && f.name !== 'fefw.log' ? esc(t('play.fileNew')) : ''}</button>`)
         .join('')}</div>` : ''}
     </div>`;
 }
@@ -36,50 +41,50 @@ export async function render(el, ctx) {
   function draw() {
     const running = status.state === 'running';
     const problems = [];
-    if (!ov.repo_ok) problems.push('The repository was not found. Set its folder in Settings.');
-    else if (!cfg.dump_dir) problems.push('No game files chosen yet.');
-    else if (!chosen) problems.push(`The game files at ${cfg.dump_dir} are not usable: ${report.errors.join(' ')}`);
-    else if (!setup.complete) problems.push(setup.progress.state === 'running' ? 'Setup is still running.' : 'Setup is not finished yet: open Setup and press Set up.');
+    if (!ov.repo_ok) problems.push(t('play.problemRepo'));
+    else if (!cfg.dump_dir) problems.push(t('play.problemNoDump'));
+    else if (!chosen) problems.push(t('play.problemBadDump', { path: cfg.dump_dir, errors: report.errors.join(' ') }));
+    else if (!setup.complete) problems.push(t(setup.progress.state === 'running' ? 'play.problemSetupRunning' : 'play.problemSetupUnfinished'));
     const ready = problems.length === 0;
     const left = setup ? setup.steps.filter((x) => x.state !== 'done').map((x) => x.title) : [];
 
     el.innerHTML = `
       <div class="page">
         <div class="hero">
-          <h1>Play</h1>
-          <p class="dim">A native PC build of the game, recompiled on this PC from your own dump.</p>
+          <h1>${esc(t('play.title'))}</h1>
+          <p class="dim">${esc(t('play.intro'))}</p>
         </div>
         ${problems.map((p) => `<div class="banner danger">${icon('circle-x')}<div>${esc(p)}</div></div>`).join('')}
-        ${problems.length && ov.repo_ok ? `<div><button class="btn primary" id="to-setup">${icon(chosen ? 'hammer' : 'folder-open')}${chosen ? 'Open Setup' : 'Choose game files'}</button></div>` : ''}
+        ${problems.length && ov.repo_ok ? `<div><button class="btn primary" id="to-setup">${icon(chosen ? 'hammer' : 'folder-open')}${esc(t(chosen ? 'play.openSetup' : 'play.chooseFiles'))}</button></div>` : ''}
 
         <div class="row wrap">
-          <button class="btn primary big" id="play" ${ready && !running ? '' : 'disabled'}>${icon('play')}${running ? 'Running' : 'Play'}</button>
+          <button class="btn primary big" id="play" ${ready && !running ? '' : 'disabled'}>${icon('play')}${esc(t(running ? 'play.running' : 'play.title'))}</button>
           ${statusChip(status)}
         </div>
         ${reportHtml(status)}
 
         <div class="card">
-          <h2>${icon('hard-drive')}Install</h2>
+          <h2>${icon('hard-drive')}${esc(t('play.install'))}</h2>
           <dl class="kv">
-            <dt>Game files</dt>
-            <dd>${chosen ? `${chosen.kind === 'update' ? 'Update ' + esc(chosen.version) : chosen.kind === 'base' ? 'Base game' : 'Folder'}<div class="path">${esc(chosen.path)}</div>` : '<span class="faint">not set</span>'}</dd>
-            <dt>DLC</dt>
-            <dd>${report && report.dlc && report.dlc.length ? `${report.dlc.length} add-on${report.dlc.length === 1 ? '' : 's'} from your dump<div class="path">${esc(report.dlc_dir)}</div>` : '<span class="faint">none in your dump (dlc/&lt;title id&gt;/romfs)</span>'}</dd>
-            <dt>Setup</dt>
-            <dd>${setup && setup.complete ? 'complete' : `<span class="faint">${left.length ? 'to do: ' + esc(left.join(', ')) : 'not started'}</span>`}</dd>
-            <dt>fefw.exe</dt>
-            <dd>${ov.exe_exists ? 'built' : '<span class="faint">not built yet</span>'}<div class="path">${esc(ov.exe)}</div></dd>
-            <dt>Run folder</dt>
-            <dd><span class="faint">fefw.ini, controls.ini, fefw.log and save/</span><div class="path">${esc(ov.game_dir)}</div></dd>
-            <dt>Mods</dt>
-            <dd><span class="faint">RomFS mods in mods/&lt;name&gt;/romfs, the layout emulators use. A name starting with - or _ turns a mod off; when two mods change the same file, the name sorted last wins. ExeFS (code) patches do not apply.</span></dd>
+            <dt>${esc(t('play.gameFiles'))}</dt>
+            <dd>${chosen ? `${esc(chosen.kind === 'update' ? t('common.update', { version: chosen.version }) : chosen.kind === 'base' ? t('common.baseGame') : t('common.folder'))}<div class="path">${esc(chosen.path)}</div>` : `<span class="faint">${esc(t('common.notSet'))}</span>`}</dd>
+            <dt>${esc(t('play.dlc'))}</dt>
+            <dd>${report && report.dlc && report.dlc.length ? `${esc(t(report.dlc.length === 1 ? 'play.dlcFound' : 'play.dlcFoundMany', { count: report.dlc.length }))}<div class="path">${esc(report.dlc_dir)}</div>` : `<span class="faint">${esc(t('play.dlcNone'))}</span>`}</dd>
+            <dt>${esc(t('play.setup'))}</dt>
+            <dd>${setup && setup.complete ? esc(t('common.complete')) : `<span class="faint">${esc(left.length ? t('common.todo', { list: left.join(', ') }) : t('common.notStarted'))}</span>`}</dd>
+            <dt>${esc(t('play.exe'))}</dt>
+            <dd>${ov.exe_exists ? esc(t('common.built')) : `<span class="faint">${esc(t('common.notBuiltYet'))}</span>`}<div class="path">${esc(ov.exe)}</div></dd>
+            <dt>${esc(t('play.runFolder'))}</dt>
+            <dd><span class="faint">${esc(t('play.runFolderContents'))}</span><div class="path">${esc(ov.game_dir)}</div></dd>
+            <dt>${esc(t('play.mods'))}</dt>
+            <dd><span class="faint">${esc(t('play.modsHint'))}</span></dd>
           </dl>
           <div class="row" style="margin-top: var(--space-4)">
-            <button class="btn" id="open-dir" ${ov.repo_ok ? '' : 'disabled'}>${icon('folder-open')}Open run folder</button>
-            <button class="btn" id="open-mods" ${ov.repo_ok ? '' : 'disabled'}>${icon('package')}Open mods folder</button>
+            <button class="btn" id="open-dir" ${ov.repo_ok ? '' : 'disabled'}>${icon('folder-open')}${esc(t('play.openRunFolder'))}</button>
+            <button class="btn" id="open-mods" ${ov.repo_ok ? '' : 'disabled'}>${icon('package')}${esc(t('play.openModsFolder'))}</button>
           </div>
         </div>
-        <p class="faint">In the game: F1 opens the runtime's settings overlay. Settings here edit fefw.ini and controls.ini and apply at the next start.</p>
+        <p class="faint">${esc(t('play.footer'))}</p>
       </div>`;
     refreshIcons();
     el.querySelector('#play')?.addEventListener('click', () => api('play').catch((e) => toast(errText(e), 'error')));
