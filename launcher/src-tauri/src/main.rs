@@ -38,8 +38,8 @@ struct Config {
     minimize_on_play: bool,
     /// do not ask GitHub for a newer release when the launcher starts
     skip_update_check: bool,
-    /// Linux: the command that starts fefw.exe (Wine or Proton, e.g. `umu-run` or `wine`). Empty: umu-run if
-    /// it is installed, else wine. Unused on Windows.
+    /// Linux: the command that starts fefw.exe (Wine or Proton, e.g. `umu-run` or `wine`). Empty: Steam's own Proton if it is
+    /// installed, else umu-run, else wine. Unused on Windows.
     runner: String,
     /// The launcher's own interface language ("en", "zh", or the code of a language pack in locales/). Empty: English.
     lang: String,
@@ -434,6 +434,9 @@ fn play(app: AppHandle, state: State<Arc<setup::Shared>>) -> Result<(), String> 
 async fn steam_status(app: AppHandle) -> steam::State {
     // off the main thread: it reads the dump folder and walks /proc
     let none = steam::State { available: false, running: false, added: false };
+    if !cfg!(target_os = "linux") {
+        return none;
+    }
     tauri::async_runtime::spawn_blocking(move || match paths(&load_config(&app)) {
         Ok(p) => steam::state(&p.exe()),
         Err(_) => steam::State { available: false, running: false, added: false },

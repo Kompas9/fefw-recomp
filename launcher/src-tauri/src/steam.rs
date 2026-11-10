@@ -436,6 +436,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn appimage_variables_are_dropped() {
         let v = |k: &str, x: &str| (k.to_string(), x.to_string());
         let env = [

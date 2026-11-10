@@ -295,8 +295,8 @@ export const zh = {
     'settings.jobs.hint': '0：比 CPU 线程数少一个。构建时内存不足可调低。',
     'settings.minimizeOnPlay.label': '游戏运行时最小化',
     'settings.runner.label': '运行器（Wine / Proton）',
-    'settings.runner.placeholder': '已安装 umu-run 时用它，否则用 wine',
-    'settings.runner.hint': '在 Linux 上启动 fefw.exe 的命令，例如 umu-run（Proton）或 wine。fefw.exe 的路径会加在其后。',
+    'settings.runner.placeholder': '优先用 Steam 自带的 Proton，其次 umu-run，最后 wine',
+    'settings.runner.hint': '在 Linux 上启动 fefw.exe 的命令，例如 umu-run（Proton）或 wine。留空时依次尝试 Steam 自带的 Proton、umu-run、wine。fefw.exe 的路径会加在其后。',
 
     // ----- 关于 -----
     'about.launcherWord': '启动器',

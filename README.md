@@ -44,7 +44,7 @@ Your saves are in the `save\` folder next to the launcher.
 ### Linux and Steam Deck
 
 Download `fefw-recomp-<version>-linux-x64.tar.gz` instead, extract it and run `fefw-launcher.AppImage`; the steps are the same. The
-game runs through Proton: Play needs [umu-launcher](https://github.com/Open-Wine-Components/umu-launcher) (`umu-run`) or Wine, or
+game runs through Proton: Play needs Steam with a Proton installed, [umu-launcher](https://github.com/Open-Wine-Components/umu-launcher) (`umu-run`) or Wine, or
 press **Add to Steam** on the Play page and start it from Steam (also in the Steam Deck's Game Mode). After an update, run Set up in
 the launcher (Desktop Mode on a Deck) before playing from Steam.
 
