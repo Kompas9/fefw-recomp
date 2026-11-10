@@ -253,6 +253,8 @@ uint32_t tex_levels(Texture* t);
 uint32_t tex_level_drop(Texture* t);   // NVN levels the image leaves out at the top ([gfx] texture_detail; 0 for nearly every texture)
 uint32_t tex_layers(Texture* t);
 bool tex_is_depth(Texture* t);
+// Readiness aligned with supported uploads; retains layout dependencies.
+bool tex_pool_preparation_pending(Texture* t);
 // Sampled image view for a binding (cached). Null when impossible (the caller binds the dummy view).
 VkImageView tex_sampled_view(Texture* t, const ViewRequest& req);
 // A float-declared sampler over this texture (the view format `requested`, UNDEFINED: the image's own): 0 when a float view gives the

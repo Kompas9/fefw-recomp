@@ -5,6 +5,7 @@
 // Uploads: prepare_texture (nvn_texdata.cpp) gives the bytes, they go through a staging buffer into one buffer-to-image copy per
 // level. Layouts are tracked per image (all levels and layers share one layout). Samplers are cached by their NVN state.
 // Readback (download_texture) copies a render target back and tiles it into the game's storage.
+#include "texture_upload_readiness.h"
 #include <mutex>
 #include <algorithm>
 #include <array>
@@ -2030,6 +2031,13 @@ uint32_t tex_levels(Texture* t) { return t->levels; }
 uint32_t tex_layers(Texture* t) { return t->layers; }
 
 bool tex_is_depth(Texture* t) { return t->fmt && t->fmt->aspect != kAspectColor; }
+
+bool tex_pool_preparation_pending(Texture* t) {
+    const TexGpu* g = t ? t->gpu : nullptr;
+    if (!g || g->failed) return true; // caller normally initializes/checks the image first
+    return pool_preparation_required(t->cpu_dirty.load(std::memory_order_relaxed), g->depth,
+                                     g->layout == tex_sampled_layout(t));
+}
 
 VkImageView tex_sampled_view(Texture* t, const ViewRequest& req) {
     TexGpu* g = tex_or_null(t);

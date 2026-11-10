@@ -1369,9 +1369,12 @@ void pool_textures_to_prepare(TexturePool* tp, std::vector<Texture*>& out) {
         r.epoch = ep;
     }
     const size_t first = out.size();
+    static const bool depth_readiness = config_get_bool("nvn", "depth_pool_readiness", true);
     auto look = [&](Texture* t) {
         if ((t->destroyed.load(std::memory_order_relaxed) && !t->gpu && !texture_registry_find_alias(t)) || !tex_gpu(t)) return;
-        if (t->cpu_dirty.load(std::memory_order_relaxed) || tex_layout(t) != tex_sampled_layout(t)) out.push_back(t);
+        const bool pending = depth_readiness ? tex_pool_preparation_pending(t)
+            : t->cpu_dirty.load(std::memory_order_relaxed) || tex_layout(t) != tex_sampled_layout(t);
+        if (pending) out.push_back(t);
     };
     if (r.all) {
         for (auto& [t, e] : r.reg) look(t);
