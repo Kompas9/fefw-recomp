@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Packs the Linux player package from the Windows one: no game code or data in it. fefw.exe stays a Windows program; on Linux the
+# launcher builds it with Linux Zig (same x86_64-windows-gnu target) and starts it through Proton (umu-run) or Wine.
+#
+#   game-build/scripts/make-release-linux.sh work/release/fefw-recomp-0.1.7-win64.zip
+#
+# Input: the zip game-build/scripts/make-release.ps1 made. Kept from it as they are: fefw_rt.dll and tools/build/sdk (fefw_rt.lib
+# and what links against it), the lifter, dump_hashes.json, fonts, locales, licences. Replaced: the launcher (built here as an
+# AppImage), the bundled Python (a relocatable CPython from python-build-standalone with the lifter's packages), Zig (the Linux
+# build of the same version) and the shader translator (dotnet publish -r linux-x64). fefw_build.py and extract_corpus.py are
+# taken from this checkout.
+#
+# Run it on x86_64 Linux (WSL2 works) with: node + npm, Rust, the .NET 10 SDK, git, curl, unzip, rsync, python3 and Tauri's
+# Linux build packages (Debian/Ubuntu: libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+# build-essential file). The Ryujinx sources for the translator are cloned into work/refs/ryubing on first use (or RYUBING_DIR).
+# Output: <out>/fefw-recomp-<version>-linux-x64.tar.gz (a tarball, so the executable bits survive).
+set -euo pipefail
+
+usage() { echo "usage: $0 <fefw-recomp-<version>-win64.zip> [--out DIR] [--version NAME]" >&2; exit 2; }
+[ $# -ge 1 ] || usage
+WIN_ZIP=$(realpath "$1"); shift
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+OUT="$ROOT/work/release"
+VERSION=$(basename "$WIN_ZIP" | sed -n 's/^fefw-recomp-\(.*\)-win64\.zip$/\1/p')
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --out) OUT=$(realpath -m "$2"); shift 2 ;;
+        --version) VERSION="$2"; shift 2 ;;
+        *) usage ;;
+    esac
+done
+[ -n "$VERSION" ] || { echo "cannot tell the version from $(basename "$WIN_ZIP"): pass --version" >&2; exit 2; }
+[ "$(uname -m)" = x86_64 ] || { echo "build on x86_64 Linux: the AppImage and the Python packages are for the machine they are built on" >&2; exit 2; }
+
+# keep these with make-release.ps1 (Zig) and launcher/src-tauri/src/setup.rs (Ryujinx revision)
+ZIG_VERSION=0.17.0
+ZIG_SHA256=1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026
+PYTHON_MINOR=3.13
+RYUBING_GIT=https://git.ryujinx.app/ryubing/ryujinx.git
+RYUBING_COMMIT=a82350bb774f70fcbd41c9987bf67a3775409963
+
+NAME="fefw-recomp-$VERSION"
+CACHE="$OUT/cache"
+STAGE="$OUT/stage-linux"
+PKG="$STAGE/$NAME"
+mkdir -p "$CACHE"
+rm -rf "$STAGE"
+mkdir -p "$STAGE"
+
+echo "--- the Windows package"
+unzip -q "$WIN_ZIP" -d "$STAGE/win"
+top=$(find "$STAGE/win" -mindepth 1 -maxdepth 1 -type d | head -1)
+[ -f "$top/fefw_rt.dll" ] && [ -f "$top/tools/build/sdk/fefw_rt.lib" ] || { echo "$WIN_ZIP is not a make-release.ps1 package" >&2; exit 1; }
+mv "$top" "$PKG"
+rm -rf "$STAGE/win" "$PKG/fefw-launcher.exe" "$PKG/tools/python" "$PKG/tools/build/zig" "$PKG/tools/spirv_harness"
+
+echo "--- launcher (AppImage)"
+(
+    cd "$ROOT/launcher"
+    # Rust keeps source paths for panic messages: map the home folder and the checkout to neutral names (as make-release.ps1)
+    export RUSTFLAGS="--remap-path-prefix=$HOME=~ --remap-path-prefix=$ROOT=."
+    export NO_STRIP=true APPIMAGE_EXTRACT_AND_RUN=1   # linuxdeploy: newer libraries trip its strip; no FUSE needed to build
+    npm ci --no-audit --no-fund
+    npm run tauri build -- --bundles appimage --config '{"bundle":{"active":true}}'
+)
+cp "$(ls -t "$ROOT"/launcher/src-tauri/target/release/bundle/appimage/*.AppImage | head -1)" "$PKG/fefw-launcher.AppImage"
+chmod +x "$PKG/fefw-launcher.AppImage"
+
+echo "--- shader translator (linux-x64)"
+RYU="${RYUBING_DIR:-$ROOT/work/refs/ryubing}"
+if [ ! -d "$RYU/src" ]; then
+    mkdir -p "$(dirname "$RYU")"
+    git clone -q --filter=blob:none --no-checkout "$RYUBING_GIT" "$RYU"
+    git -C "$RYU" checkout -q "$RYUBING_COMMIT"
+fi
+dst="$ROOT/tools/shaders/third_party/ryubing"   # what tools/shaders/scripts/setup_ryujinx.ps1 stages
+mkdir -p "$dst/src"
+for p in Ryujinx.Common Spv.Generator Ryujinx.Graphics.Shader; do rsync -a --delete --exclude obj --exclude bin "$RYU/src/$p/" "$dst/src/$p/"; done
+for f in Directory.Build.props Directory.Packages.props global.json nuget.config LICENSE.txt; do cp "$RYU/$f" "$dst/$f"; done
+rm -rf "$OUT/harness-linux"   # always rebuilt, as make-release.ps1 does
+dotnet publish "$ROOT/tools/shaders/harness/SpirvHarness.csproj" -c Release -r linux-x64 --self-contained true -o "$OUT/harness-linux" \
+    -p:DebugType=none -p:DebugSymbols=false -p:Deterministic=true "-p:PathMap=$ROOT=."
+cp -a "$OUT/harness-linux" "$PKG/tools/spirv_harness"
+"$PKG/tools/spirv_harness/spirv_harness" --help >/dev/null 2>&1 || [ $? -le 2 ] || { echo "the shader translator does not start" >&2; exit 1; }
+
+echo "--- from this checkout"
+cp "$ROOT/game-build/release/fefw_build.py" "$PKG/tools/build/fefw_build.py"
+cp "$ROOT/tools/shaders/ampere/extract_corpus.py" "$PKG/tools/shaders/extract_corpus.py"
+sed "s/@VERSION@/$VERSION/" "$ROOT/game-build/release/README-linux.txt" > "$PKG/README.txt"
+
+echo "--- Zig $ZIG_VERSION"
+zig="$CACHE/zig-x86_64-linux-$ZIG_VERSION.tar.xz"
+[ -f "$zig" ] || curl -fsSL -o "$zig.part" "https://ziglang.org/download/$ZIG_VERSION/zig-x86_64-linux-$ZIG_VERSION.tar.xz"
+[ -f "$zig" ] || mv "$zig.part" "$zig"
+echo "$ZIG_SHA256  $zig" | sha256sum -c --quiet || { rm -f "$zig"; echo "sha256 mismatch: $zig" >&2; exit 1; }
+mkdir -p "$PKG/tools/build/zig"
+tar xf "$zig" -C "$PKG/tools/build/zig" --strip-components=1 --exclude='*/doc/*'
+
+echo "--- Python $PYTHON_MINOR (python-build-standalone)"
+url=$(curl -fsSL https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest | python3 -c '
+import json, re, sys
+minor = sys.argv[1].replace(".", r"\.")
+pat = re.compile(r"^cpython-" + minor + r"\.\d+\+\d+-x86_64-unknown-linux-gnu-install_only\.tar\.gz$")
+names = [a for a in json.load(sys.stdin)["assets"] if pat.match(a["name"])]
+print(names[0]["browser_download_url"] if names else "")' "$PYTHON_MINOR")
+[ -n "$url" ] || { echo "no CPython $PYTHON_MINOR build in python-build-standalone's latest release" >&2; exit 1; }
+py="$CACHE/$(basename "$url" | sed 's/%2B/+/g')"
+[ -f "$py" ] || curl -fsSL -o "$py" "$url"
+echo "$(basename "$py")"
+tar xf "$py" -C "$PKG/tools"   # unpacks as python/
+"$PKG/tools/python/bin/python3" -m pip install --quiet --no-cache-dir --disable-pip-version-check capstone==5.0.9 lz4 zbic zstandard
+"$PKG/tools/python/bin/python3" -I -c "import zbic, lz4, capstone, zstandard"
+# the launcher runs bin/python3 -I only: pip's console scripts carry this machine's absolute path in their shebangs
+find "$PKG/tools/python/bin" -maxdepth 1 -type f \( -name 'pip*' -o -name 'idle*' -o -name 'pydoc*' -o -name '2to3*' \) -delete
+find "$PKG/tools/python" -name __pycache__ -prune -exec rm -rf {} +
+cp "$PKG/tools/python/lib/python$PYTHON_MINOR/LICENSE.txt" "$PKG/licenses/LICENSE.Python.PSF.txt"
+
+echo "--- checks"
+# never ship anything from a game dump, a shader cache built from the game, saves or keys
+bad=$(find "$PKG" \( -iname '*.nso' -o -iname '*.nro' -o -iname '*.nca' -o -iname '*.nsp' -o -iname '*.xci' -o -iname '*.nup' \
+    -o -iname '*.nsz' -o -iname '*.xcz' -o -iname '*.spv' -o -iname '*.keys' -o -iname '*.sav' -o -name fefw.exe -o -name fefw.ini \
+    -o -name controls.ini -o -name exefs -o -name romfs -o -name shader_cache -o -name save -o -name saves \) -print)
+[ -z "$bad" ] || { echo "game-derived or private files in the package:"; echo "$bad"; exit 1; } >&2
+# and nothing that names the machine it was built on
+leaks=""
+[ ${#HOME} -lt 8 ] || leaks=$(grep -rl --binary-files=text -F "$HOME" "$PKG" || true)
+[ -z "$leaks" ] || { echo "build-machine path ($HOME) in:"; echo "$leaks"; exit 1; } >&2
+
+tarball="$OUT/$NAME-linux-x64.tar.gz"
+tar -C "$STAGE" -czf "$tarball" "$NAME"
+echo "wrote $tarball ($(( $(stat -c %s "$tarball") / 1048576 )) MiB)"

@@ -91,6 +91,25 @@ FSR 3 in a source build: put AMD's DLLs in `upscalers\fsr` next to `fefw.exe` or
 `PrebuiltSignedDLL` of tag v1.1.4 for frame generation. `game-build\scripts\make-release.ps1` downloads the same files (sha256 and AMD
 signature checked) into the release package; they are never committed.
 
+## Linux package
+
+On Linux the game still runs as `fefw.exe` through Proton or Wine; the launcher, the first-run build and the shader translator run
+natively. `fefw_build.py` builds the same `x86_64-windows-gnu` executable with the Linux build of Zig, and Play starts it through
+the launcher's **Runner** setting (empty: `umu-run`, else `wine`). The launcher writes the `fefw.ini` paths as `Z:/...` so they work
+under Wine and Proton, also when the game is started from Steam (**Add to Steam** on the Play page adds it as a non-Steam game).
+Updating from the launcher is Windows-only for now.
+
+The Linux package is made from the Windows one, after `make-release.ps1`, on x86_64 Linux or WSL2:
+
+```
+game-build/scripts/make-release-linux.sh work/release/fefw-recomp-<version>-win64.zip
+```
+
+It keeps the runtime (`fefw_rt.dll`, `tools/build/sdk`), the lifter and the rest of the zip, and replaces the launcher (an AppImage
+built there), Python (a relocatable CPython from python-build-standalone with the same packages), Zig (same version) and the shader
+translator (`dotnet publish -r linux-x64`). The script's header lists what it needs installed. It writes
+`work/release/fefw-recomp-<version>-linux-x64.tar.gz`.
+
 ## Repository layout
 
 | Folder | What |
