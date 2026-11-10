@@ -11,9 +11,12 @@
 # build of the same version) and the shader translator (dotnet publish -r linux-x64). fefw_build.py and extract_corpus.py are
 # taken from this checkout.
 #
-# Run it on x86_64 Linux (WSL2 works) with: node + npm, Rust, the .NET 10 SDK, git, curl, unzip, rsync, python3 and Tauri's
-# Linux build packages (Debian/Ubuntu: libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
-# build-essential file). The Ryujinx sources for the translator are cloned into work/refs/ryubing on first use (or RYUBING_DIR).
+# Run it on x86_64 Linux (WSL2 works) with: node 20+ and npm, Rust (rustup), the .NET 10 SDK, git, curl, unzip, rsync, python3 and
+# Tauri's Linux build packages. Debian/Ubuntu (tried on Ubuntu 26.04):
+#   sudo apt install build-essential file curl git rsync unzip python3 nodejs npm dotnet-sdk-10.0 \
+#       libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+#   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+# The Ryujinx sources for the translator are cloned into work/refs/ryubing on first use (or RYUBING_DIR).
 # Output: <out>/fefw-recomp-<version>-linux-x64.tar.gz (a tarball, so the executable bits survive).
 set -euo pipefail
 
@@ -32,6 +35,10 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$VERSION" ] || { echo "cannot tell the version from $(basename "$WIN_ZIP"): pass --version" >&2; exit 2; }
 [ "$(uname -m)" = x86_64 ] || { echo "build on x86_64 Linux: the AppImage and the Python packages are for the machine they are built on" >&2; exit 2; }
+
+# WSL appends the Windows PATH; linuxdeploy (the AppImage step) crashes on an unreadable entry among them (WindowsApps)
+PATH=$(echo "$PATH" | tr ':' '\n' | grep -v '^/mnt/' | paste -sd:)
+export PATH
 
 # keep these with make-release.ps1 (Zig) and launcher/src-tauri/src/setup.rs (Ryujinx revision)
 ZIG_VERSION=0.17.0

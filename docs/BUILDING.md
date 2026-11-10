@@ -107,8 +107,19 @@ game-build/scripts/make-release-linux.sh work/release/fefw-recomp-<version>-win6
 
 It keeps the runtime (`fefw_rt.dll`, `tools/build/sdk`), the lifter and the rest of the zip, and replaces the launcher (an AppImage
 built there), Python (a relocatable CPython from python-build-standalone with the same packages), Zig (same version) and the shader
-translator (`dotnet publish -r linux-x64`). The script's header lists what it needs installed. It writes
-`work/release/fefw-recomp-<version>-linux-x64.tar.gz`.
+translator (`dotnet publish -r linux-x64`). It writes `work/release/fefw-recomp-<version>-linux-x64.tar.gz`.
+
+It needs Node 20+, Rust, the .NET 10 SDK and Tauri's Linux packages. On Debian/Ubuntu (tried on Ubuntu 26.04, in WSL2):
+
+```
+sudo apt install build-essential file curl git rsync unzip python3 nodejs npm dotnet-sdk-10.0 \
+    libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+Other distributions need the equivalent packages. In WSL2 the Windows `PATH` is appended to the Linux one; the script drops those
+`/mnt/...` entries, because `linuxdeploy` (the AppImage step) crashes on an unreadable one. Build from a checkout on the Linux
+filesystem (`~/fefw-recomp`), not `/mnt/c/...`: it is much faster.
 
 ## Repository layout
 
