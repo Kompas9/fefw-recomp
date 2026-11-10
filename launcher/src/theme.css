@@ -43,8 +43,7 @@
   /* type */
   --font-ui: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
   --font-display: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
-  --font-mono: "Cascadia Mono", Consolas, "Courier New", monospace;
-  --font-size-xs: 0.75rem;
+  --font-mono: "Cascadia Mono", Consolas, "Courier New", monospace;  --font-size-xs: 0.75rem;
   --font-size-sm: 0.8125rem;
   --font-size-md: 0.9375rem;
   --font-size-lg: 1.125rem;
@@ -74,4 +73,15 @@
   --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.35), 0 8px 24px rgba(0, 0, 0, 0.18);
   --shadow-pop: 0 12px 40px rgba(0, 0, 0, 0.45);
   --transition: 140ms ease;
+}
+
+/* Interface languages that need a CJK face: the Segoe stack has no glyphs for them, so the
+   system's own Chinese/Japanese/Korean fonts are named here and the browser picks the first
+   installed one. Latin text still comes from the stack above. */
+html.cjk {
+  --font-ui: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei",
+    "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Source Han Sans SC", system-ui, sans-serif;
+  --font-display: "Segoe UI Variable Display", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei",
+    "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Source Han Sans SC", system-ui, sans-serif;
+  --font-mono: "Cascadia Mono", Consolas, "Microsoft YaHei UI", "Noto Sans Mono CJK SC", monospace;
 }

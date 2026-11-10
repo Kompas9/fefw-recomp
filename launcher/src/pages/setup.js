@@ -1,65 +1,87 @@
 import { listen } from '@tauri-apps/api/event';
 import { api, esc, icon, refreshIcons, toast, errText } from '../util.js';
+import { t } from '../i18n.js';
+import { checkText, dumpText, stepTitle } from '../rusttext.js';
 
 // one listener for the session; the page being shown sets the handler
 let nupHandler = null;
 listen('nup-progress', (ev) => nupHandler && nupHandler(ev.payload));
 const nupPct = (p) => (p && p.total ? Math.min(100, Math.floor((100 * p.done) / p.total)) : 0);
-const nupMsg = (p) => (p && p.total ? `Unpacking the .nup: ${nupPct(p)}%${p.file ? ` (${p.file})` : ''}` : 'Reading the .nup...');
+const nupMsg = (p) =>
+  p && p.total
+    ? t(p.file ? 'setup.unpackingNupFile' : 'setup.unpackingNup', { pct: nupPct(p), file: p.file || '' })
+    : t('setup.readingNup');
 
 const MAX_LOG = 600;
 
+/*
+ * The step titles, the check labels and the dump messages come from the Rust side (setup.rs, dump.rs) in English and are
+ * translated in rusttext.js; `checkText` keeps a label it does not know as it came.
+ */
+function checkLabel(label) {
+  const text = checkText(label);
+  return text === label ? (label === 'exefs/main is decrypted' || /^supported version \(/.test(label) ? text : null) : text;
+}
+const dumpError = (s) => dumpText(s);
+const progressMsg = (m) => dumpText(m);
+
 function candidateHtml(c, chosen) {
-  const title = c.kind === 'base' ? 'Base game' : c.kind === 'update' ? `Update ${esc(c.version)}` : 'This folder';
+  const title = c.kind === 'base' ? t('common.baseGame') : c.kind === 'update' ? t('common.update', { version: c.version }) : t('common.folder');
   const used = chosen && chosen.path === c.path;
   const unneeded = chosen && !used && !c.ok;
   const chip = used
-    ? `<span class="chip ok">${icon('circle-check')}Will be used</span>`
-    : c.ok ? '<span class="chip">Valid</span>'
-    : unneeded ? '<span class="chip">Not needed</span>'
-    : `<span class="chip danger">${icon('circle-x')}Not usable</span>`;
+    ? `<span class="chip ok">${icon('circle-check')}${esc(t('setup.willBeUsed'))}</span>`
+    : c.ok ? `<span class="chip">${esc(t('setup.valid'))}</span>`
+    : unneeded ? `<span class="chip">${esc(t('setup.notNeeded'))}</span>`
+    : `<span class="chip danger">${icon('circle-x')}${esc(t('setup.notUsable'))}</span>`;
   return `
     <div class="candidate ${used ? 'chosen' : ''}">
-      <div class="row between"><h3>${title}</h3>${chip}</div>
+      <div class="row between"><h3>${esc(title)}</h3>${chip}</div>
       <div class="path">${esc(c.path)}</div>
-      ${unneeded ? '' : `<ul class="checks">${c.checks.map((k) => `<li class="${k.ok ? 'ok' : 'bad'}">${icon(k.ok ? 'circle-check' : 'circle-x')}${esc(k.label)}</li>`).join('')}</ul>`}
+      ${unneeded ? '' : `<ul class="checks">${c.checks.map((k) => `<li class="${k.ok ? 'ok' : 'bad'}">${icon(k.ok ? 'circle-check' : 'circle-x')}${esc(checkLabel(k.label) || k.label)}</li>`).join('')}</ul>`}
     </div>`;
 }
 
 function toolsHtml(tools) {
-  const missing = tools.filter((t) => !t.ok);
+  const missing = tools.filter((tool) => !tool.ok);
+  const tail = !missing.length
+    ? t('setup.toolsAllFound')
+    : missing.length === 1
+      ? t('setup.toolsMissingOne')
+      : t('setup.toolsMissingMany', { count: missing.length });
   return `
     <div class="card">
-      <h2>${icon('list-checks')}Build tools on this PC</h2>
-      <p class="dim">Setup compiles the game on your PC from your own dump, so it needs a C++ toolchain. ${missing.length ? `${missing.length} missing: install ${missing.length > 1 ? 'them' : 'it'}, then come back.` : 'Everything was found.'}</p>
+      <h2>${icon('list-checks')}${esc(t('setup.toolsTitle'))}</h2>
+      <p class="dim">${esc(t('setup.toolsIntro') + tail)}</p>
       <div class="tools">
-        ${tools.map((t) => `<span class="${t.ok ? 'ok' : 'bad'}">${icon(t.ok ? 'circle-check' : 'circle-x')} ${esc(t.name)}</span><span class="${t.ok ? 'faint' : 'dim'}">${esc(t.ok ? t.found : t.hint)}</span>`).join('')}
+        ${tools.map((tool) => `<span class="${tool.ok ? 'ok' : 'bad'}">${icon(tool.ok ? 'circle-check' : 'circle-x')} ${esc(tool.name)}</span><span class="${tool.ok ? 'faint' : 'dim'}">${esc(tool.ok ? tool.found : tool.hint)}</span>`).join('')}
       </div>
     </div>`;
 }
+
 
 function stepsHtml(s) {
   const p = s.progress;
   const running = p.state === 'running';
   const pct = p.total ? Math.floor((100 * p.done) / p.total) : 0;
-  const label = s.complete ? 'Check again' : s.steps.some((x) => x.state === 'done') ? 'Continue setup' : 'Set up';
+  const label = s.complete ? t('setup.checkAgain') : s.steps.some((x) => x.state === 'done') ? t('setup.continueSetup') : t('setup.setUp');
   const stepIcon = (x) => (x.state === 'done' ? 'circle-check' : x.state === 'running' ? 'loader-circle' : 'circle');
   return `
     <div class="card" id="steps-card">
-      <h2>${icon('hammer')}Set up</h2>
+      <h2>${icon('hammer')}${esc(t('setup.setUp'))}</h2>
       <div class="stack">
-        <ul class="steps">${s.steps.map((x) => `<li class="${x.state}">${icon(stepIcon(x), x.state === 'running' ? 'spin' : '')}${esc(x.title)}</li>`).join('')}</ul>
-        ${running ? `<p class="dim">${esc(p.message)}</p><progress max="100" ${p.total ? `value="${pct}"` : ''}></progress>
-          <p class="faint">${p.total ? `${p.done} of ${p.total}. ` : ''}Pause stops the tools; finished work is kept and Set up continues from there.</p>` : ''}
-        ${p.state === 'error' ? `<div class="banner danger">${icon('circle-x')}<div style="white-space: pre-wrap">${esc(p.message)}</div></div>` : ''}
-        ${p.state === 'cancelled' || p.state === 'done' ? `<p class="dim">${esc(p.message)}</p>` : ''}
-        ${!running && !s.complete && p.state !== 'error' ? `<p class="faint">The first run takes a long time: the recompile of the game code is the biggest step (an hour or more on 8 cores, with ${s.jobs} build processes here) and needs about 30 GB free. Later runs only redo what changed.</p>` : ''}
+        <ul class="steps">${s.steps.map((x) => `<li class="${x.state}">${icon(stepIcon(x), x.state === 'running' ? 'spin' : '')}${esc(stepTitle(x))}</li>`).join('')}</ul>
+        ${running ? `<p class="dim">${esc(progressMsg(p.message))}</p><progress max="100" ${p.total ? `value="${pct}"` : ''}></progress>
+          <p class="faint">${esc((p.total ? t('setup.progressDone', { done: p.done, total: p.total }) : '') + t('setup.pauseHint'))}</p>` : ''}
+        ${p.state === 'error' ? `<div class="banner danger">${icon('circle-x')}<div style="white-space: pre-wrap">${esc(progressMsg(p.message))}</div></div>` : ''}
+        ${p.state === 'cancelled' || p.state === 'done' ? `<p class="dim">${esc(progressMsg(p.message))}</p>` : ''}
+        ${!running && !s.complete && p.state !== 'error' ? `<p class="faint">${esc(t('setup.firstRunHint', { jobs: s.jobs }))}</p>` : ''}
         <div class="row">
           ${running
-            ? `<button class="btn" id="setup-cancel">${icon('circle-x')}Pause</button>`
-            : `<button class="btn ${s.complete ? '' : 'primary'}" id="setup-run">${icon('hammer')}${label}</button>`}
-          ${s.complete && !running ? `<button class="btn primary" id="to-play">${icon('play')}Go to Play</button>` : ''}
-          <button class="btn quiet" id="open-log">${icon('file-text')}Open full log</button>
+            ? `<button class="btn" id="setup-cancel">${icon('circle-x')}${esc(t('setup.pause'))}</button>`
+            : `<button class="btn ${s.complete ? '' : 'primary'}" id="setup-run">${icon('hammer')}${esc(label)}</button>`}
+          ${s.complete && !running ? `<button class="btn primary" id="to-play">${icon('play')}${esc(t('setup.goToPlay'))}</button>` : ''}
+          <button class="btn quiet" id="open-log">${icon('file-text')}${esc(t('setup.openFullLog'))}</button>
         </div>
       </div>
     </div>`;
@@ -107,46 +129,46 @@ export async function render(el, ctx) {
   function draw() {
     const ok = report && report.chosen;
     if (!ov.repo_ok) {
-      el.innerHTML = `<div class="page"><div class="hero"><h1>Setup</h1></div>
-        <div class="banner danger">${icon('circle-x')}<div>The repository was not found next to the launcher. Build the launcher inside a checkout of this project (launcher/), or set the repository folder in Settings.</div></div></div>`;
+      el.innerHTML = `<div class="page"><div class="hero"><h1>${esc(t('setup.title'))}</h1></div>
+        <div class="banner danger">${icon('circle-x')}<div>${esc(t('setup.repoMissing'))}</div></div></div>`;
       refreshIcons();
       return;
     }
     el.innerHTML = `
       <div class="page">
         <div class="hero">
-          <h1>${ctx.firstRun ? 'Welcome. Set up from your own dump.' : 'Setup'}</h1>
-          <p class="dim">This project contains no game files and no game code. Point it at your own legally dumped, decrypted copy of the game: setup reads it (it never writes to it), recompiles the game code on this PC and translates the shaders, all on this PC.</p>
+          <h1>${esc(ctx.firstRun ? t('setup.titleFirstRun') : t('setup.title'))}</h1>
+          <p class="dim">${esc(t('setup.intro'))}</p>
         </div>
 
         <div class="card">
-          <h2>${icon('folder-search')}Your dump</h2>
+          <h2>${icon('folder-search')}${esc(t('setup.yourDump'))}</h2>
           <div class="stack">
             <div class="row">
-              <input type="text" id="path" spellcheck="false" placeholder="folder with exefs/ and romfs/" value="${esc(path)}" />
-              <button class="btn" id="browse" ${nupBusy ? 'disabled' : ''}>${icon('folder-open')}Browse</button>
-              <button class="btn" id="browse-nup" ${nupBusy ? 'disabled' : ''}>${icon('file-archive')}.nup</button>
+              <input type="text" id="path" spellcheck="false" placeholder="${esc(t('setup.pathPlaceholder'))}" value="${esc(path)}" />
+              <button class="btn" id="browse" ${nupBusy ? 'disabled' : ''}>${icon('folder-open')}${esc(t('common.browse'))}</button>
+              <button class="btn" id="browse-nup" ${nupBusy ? 'disabled' : ''}>${icon('file-archive')}${esc(t('setup.nup'))}</button>
             </div>
-            ${nupBusy ? `<p class="dim" id="nup-msg">${nupMsg(nupProgress)}</p><progress max="100" value="${nupPct(nupProgress)}"></progress>` : ''}
-            <p class="faint">Or pick a <code>.nup</code> package (the NUP format of github.com/a55uka/nup): it is unpacked once into a <code>nup_dump</code> folder and used from there, so it needs the free space of the whole game.</p>
-            <p class="faint">Either the folder holding <code>exefs/</code> and <code>romfs/</code> of the supported update, or a dump root with <code>base/</code> and <code>updates/&lt;version&gt;/</code>. The ExeFS needs main, sdk, subsdk0, subsdk1, subsdk2 and rtld. DLC you dumped goes in <code>dlc/&lt;title id&gt;/romfs</code> of the same folder (a <code>.nup</code> with add-ons is unpacked that way).</p>
-            ${status.package ? '<p class="faint">Everything the setup needs is in this package: nothing else to install.</p>' : ''}
+            ${nupBusy ? `<p class="dim" id="nup-msg">${esc(nupMsg(nupProgress))}</p><progress max="100" value="${nupPct(nupProgress)}"></progress>` : ''}
+            <p class="faint">${esc(t('setup.nupHint'))}</p>
+            <p class="faint">${esc(t('setup.dumpHint'))}</p>
+            ${status.package ? `<p class="faint">${esc(t('setup.packageComplete'))}</p>` : ''}
           </div>
         </div>
 
-        ${report && report.errors.length ? `<div class="banner danger">${icon('circle-x')}<div>${report.errors.map(esc).join('<br>')}</div></div>` : ''}
+        ${report && report.errors.length ? `<div class="banner danger">${icon('circle-x')}<div>${report.errors.map((e) => esc(dumpError(e))).join('<br>')}</div></div>` : ''}
         ${report && report.candidates.length ? `<div class="stack">${report.candidates.map((c) => candidateHtml(c, report.chosen)).join('')}</div>` : ''}
-        ${report && report.dlc && report.dlc.length ? `<div class="banner info">${icon('package')}<div>DLC from your dump: ${report.dlc.map(esc).join(', ')}</div></div>` : ''}
+        ${report && report.dlc && report.dlc.length ? `<div class="banner info">${icon('package')}<div>${esc(t('setup.dlcFound', { list: report.dlc.join(', ') }))}</div></div>` : ''}
 
         <div class="row">
-          <button class="btn ${ok && saved !== path ? 'primary' : ''}" id="use" ${ok && status.progress.state !== 'running' ? '' : 'disabled'}>${icon('circle-check')}Use these game files</button>
+          <button class="btn ${ok && saved !== path ? 'primary' : ''}" id="use" ${ok && status.progress.state !== 'running' ? '' : 'disabled'}>${icon('circle-check')}${esc(t('setup.useFiles'))}</button>
         </div>
 
-        ${status.package ? "" : toolsHtml(status.tools)}
+        ${status.package ? '' : toolsHtml(status.tools)}
         ${ok && saved === path ? stepsHtml(status) : ''}
 
         <div class="card">
-          <h2>${icon('terminal')}Log</h2>
+          <h2>${icon('terminal')}${esc(t('setup.log'))}</h2>
           <div class="logbox" id="log"></div>
         </div>
       </div>`;
@@ -161,7 +183,7 @@ export async function render(el, ctx) {
     input.addEventListener('change', check);
     input.addEventListener('keydown', (e) => e.key === 'Enter' && check());
     el.querySelector('#browse').addEventListener('click', async () => {
-      const picked = await api('pick_folder', { title: 'Choose your decrypted dump folder', start: input.value || null });
+      const picked = await api('pick_folder', { title: t('setup.chooseDumpTitle'), start: input.value || null });
       if (picked) {
         input.value = picked;
         check();
@@ -187,7 +209,7 @@ export async function render(el, ctx) {
         await api('save_dump', { path });
         saved = path;
         status = await api('setup_status');
-        toast('Game files saved. Next: Set up.', 'ok');
+        toast(t('setup.filesSaved'), 'ok');
         draw();
       } catch (e) {
         toast(errText(e), 'error');

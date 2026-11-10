@@ -1,112 +1,122 @@
 import { api, esc, icon, refreshIcons, toast, errText } from '../util.js';
+import { t, getLang, listLangs, setLang } from '../i18n.js';
 
 /*
  * Settings schema. Every key is described in runtime/docs/CONFIG.md.
  *   file: "game" (fefw.ini), "controls" (controls.ini, written by the game on its first start) or "config" (the launcher's own options)
- * Types: select, toggle, size, autonum, range, path, text, number. A toggle with `on` / `off` writes those words instead of 1 / 0 (`off`,
- * 0, false or no read as off, anything else as on).
+ * Types: select, toggle, size, autonum, range, path, text, number, language. A toggle with `on` / `off` writes those words
+ * instead of 1 / 0 (`off`, 0, false or no read as off, anything else as on).
+ * Text is a key into src/locales: `label` and `hint` are always translated, and an option name that contains a dot is a key
+ * too (a plain name such as "720p" or "DLAA" is shown as it is).
  */
 const SECTIONS = [
   {
-    title: 'Picture', icon: 'monitor', file: 'game',
+    title: 'settings.sec.picture', icon: 'monitor', file: 'game',
     fields: [
-      { id: 'output', type: 'select', label: 'Output resolution', sec: 'fefw', key: 'output', def: 'console',
-        options: [['console', 'Console (docked 1440p)'], ['720p', '720p'], ['1080p', '1080p'], ['1440p', '1440p'], ['2160p', '2160p (4K)'],
-          ['2560x1080', '2560 x 1080 (21:9)'], ['3440x1440', '3440 x 1440 (21:9)'], ['5120x1440', '5120 x 1440 (32:9, drawn at 3840 x 1080)'], ['window', 'Window size at start']],
-        hint: 'The size the game draws its picture, UI and effects at. Applies at the next start.' },
-      { id: 'ultrawide', type: 'toggle', label: 'Ultrawide', sec: 'fefw', key: 'ultrawide', def: 'auto', on: 'auto', off: 'off',
-        hint: 'With an output wider than 16:9 (a wide size above, or the window size at start in a wide window) the 3D view gets wider and the menus, HUD and movies stay in the centre at 16:9. Off stretches the 16:9 picture.' },
-      { id: 'render_ratio', type: 'select', label: 'Render scale', sec: 'fefw', key: 'render_ratio', def: '0',
-        options: [['0', "Game's own (50%)"], ['0.5', '50%'], ['0.67', '67%'], ['0.75', '75%'], ['1.0', '100% (native, sharpest)']],
-        hint: '3D render size per side, as a share of the output. The upscaler fills in the rest.' },
-      // The runtime turns [fefw] render_ratio into a DLSS quality tier on its own (temporal_dlss.cpp, kModes); this
-      // field writes the same key as Render scale so the two controls always agree.
-      { id: 'sr_tier', type: 'select', label: 'Upscaling tier', sec: 'fefw', key: 'render_ratio', def: '0',
-        options: [['0', "Game's own"], ['0.33', 'Ultra Performance'], ['0.5', 'Performance'], ['0.59', 'Balanced'],
-          ['0.67', 'Quality'], ['0.75', 'Ultra Quality'], ['0.85', 'High Quality'], ['1.0', 'DLAA']],
-        hint: 'The DLSS quality tier. Writes the same render_ratio key as Render scale: DLAA=100%, Ultra Quality=75%, Quality=67%, Balanced=59%, Performance=50%, Ultra Performance=33%.' },
-      { id: 'upscaler', type: 'select', label: 'Upscaler', sec: 'dlss', key: 'upscaler', def: 'taau',
-        options: [['taau', 'Built-in temporal (TAAU)'], ['dlss', 'NVIDIA DLSS (RTX; needs the Streamline files)'], ['fsr3', 'AMD FSR 3.1 (needs its DLLs)'], ['bilinear', 'Bilinear (no history)'], ['auto', 'Automatic (DLSS, else FSR 3, else TAAU)']],
-        hint: "Stands in for the console's DLSS. TAAU needs no extra files. DLSS and FSR 3 need their DLLs, and a change applies at the next start." },
-      { id: 'dlss_dll', type: 'path', label: 'DLSS (Streamline) folder', sec: 'upscale', key: 'dlss_dll', def: '', placeholder: 'upscalers/streamline next to the launcher',
-        hint: 'NVIDIA files, not included: sl.interposer.dll, sl.common.dll, sl.dlss.dll and nvngx_dlss.dll from the Streamline SDK. Leave empty for upscalers/streamline next to the launcher.' },
-      { id: 'quality', type: 'select', label: 'Quality', sec: 'fefw', key: 'quality', def: 'console',
-        options: [['console', 'As the console picks'], ['docked', 'Always docked quality']] },
-      { id: 'shadow_size', type: 'select', label: 'Shadow map size', sec: 'fefw', key: 'shadow_size', def: '0',
-        options: [['0', "Game's own"], ['2048', '2048'], ['4096', '4096'], ['8192', '8192']] },
+      { id: 'output', type: 'select', label: 'settings.output.label', sec: 'fefw', key: 'output', def: 'console',
+        options: [['console', 'settings.output.console'], ['720p', '720p'], ['1080p', '1080p'], ['1440p', '1440p'], ['2160p', '2160p (4K)'],
+          ['2560x1080', 'settings.output.uw2560'], ['3440x1440', 'settings.output.uw3440'], ['5120x1440', 'settings.output.uw5120'],
+          ['window', 'settings.output.window']],
+        hint: 'settings.output.hint' },
+      { id: 'ultrawide', type: 'toggle', label: 'settings.ultrawide.label', sec: 'fefw', key: 'ultrawide', def: 'auto', on: 'auto', off: 'off',
+        onLabel: 'settings.ultrawide.auto', offLabel: 'settings.ultrawide.off', hint: 'settings.ultrawide.hint' },
+      { id: 'render_ratio', type: 'select', label: 'settings.renderRatio.label', sec: 'fefw', key: 'render_ratio', def: '0',
+        options: [['0', 'settings.renderRatio.game'], ['0.5', '50%'], ['0.67', '67%'], ['0.75', '75%'], ['1.0', 'settings.renderRatio.full']],
+        hint: 'settings.renderRatio.hint' },
+      { id: 'sr_tier', type: 'select', label: 'settings.srTier.label', sec: 'fefw', key: 'render_ratio', def: '0',
+        options: [['0', 'settings.srTier.game'], ['0.33', 'settings.srTier.ultraPerformance'], ['0.5', 'settings.srTier.performance'],
+          ['0.59', 'settings.srTier.balanced'], ['0.67', 'settings.srTier.quality'], ['0.75', 'settings.srTier.ultraQuality'],
+          ['0.85', 'settings.srTier.highQuality'], ['1.0', 'settings.srTier.dlaa']],
+        hint: 'settings.srTier.hint' },
+      { id: 'upscaler', type: 'select', label: 'settings.upscaler.label', sec: 'dlss', key: 'upscaler', def: 'taau',
+        options: [['taau', 'settings.upscaler.taau'], ['dlss', 'settings.upscaler.dlss'], ['fsr3', 'settings.upscaler.fsr3'],
+          ['bilinear', 'settings.upscaler.bilinear'], ['auto', 'settings.upscaler.auto']],
+        hint: 'settings.upscaler.hint' },
+      { id: 'dlss_dll', type: 'path', label: 'settings.dlssDll.label', sec: 'upscale', key: 'dlss_dll', def: '', placeholder: 'settings.dlssDll.placeholder',
+        hint: 'settings.dlssDll.hint' },
+      { id: 'quality', type: 'select', label: 'settings.quality.label', sec: 'fefw', key: 'quality', def: 'console',
+        options: [['console', 'settings.quality.console'], ['docked', 'settings.quality.docked']] },
+      { id: 'shadow_size', type: 'select', label: 'settings.shadowSize.label', sec: 'fefw', key: 'shadow_size', def: '0',
+        options: [['0', 'settings.shadowSize.game'], ['2048', '2048'], ['4096', '4096'], ['8192', '8192']] },
     ],
   },
   {
     // [tweaks] language of controls.ini (runtime/docs/CONFIG.md). The names are the ones the runtime reads (services/common.cpp); the list is
     // the languages the game ships (games/fefw/fefw_data.cpp). A [system] language in fefw.ini wins over this.
-    title: 'Language', icon: 'languages', file: 'controls',
+    title: 'settings.sec.language', icon: 'languages', file: 'controls',
     fields: [
-      { id: 'language', type: 'select', label: 'Game language', sec: 'tweaks', key: 'language', def: 'auto',
+      { id: 'language', type: 'select', label: 'settings.gameLang.label', sec: 'tweaks', key: 'language', def: 'auto',
         options: [
-          ['auto', 'Automatic (Windows language)'],
-          ['AmericanEnglish', 'English (US)'], ['BritishEnglish', 'English (UK)'], ['Japanese', '日本語 (Japanese)'],
-          ['French', 'Français (French)'], ['CanadianFrench', 'Français (Canada)'], ['German', 'Deutsch (German)'], ['Italian', 'Italiano (Italian)'],
-          ['Spanish', 'Español (Spain)'], ['LatinAmericanSpanish', 'Español (Latin America)'], ['Korean', '한국어 (Korean)'],
-          ['SimplifiedChinese', '简体中文 (Simplified Chinese)'], ['TraditionalChinese', '繁體中文 (Traditional Chinese)'],
+          ['auto', 'settings.gameLang.auto'],
+          ['AmericanEnglish', 'settings.gameLang.americanEnglish'], ['BritishEnglish', 'settings.gameLang.britishEnglish'],
+          ['Japanese', 'settings.gameLang.japanese'], ['French', 'settings.gameLang.french'],
+          ['CanadianFrench', 'settings.gameLang.canadianFrench'], ['German', 'settings.gameLang.german'],
+          ['Italian', 'settings.gameLang.italian'], ['Spanish', 'settings.gameLang.spanish'],
+          ['LatinAmericanSpanish', 'settings.gameLang.latinSpanish'], ['Korean', 'settings.gameLang.korean'],
+          ['SimplifiedChinese', 'settings.gameLang.simplifiedChinese'], ['TraditionalChinese', 'settings.gameLang.traditionalChinese'],
         ],
-        hint: "The language of the game's text and voices. Automatic uses your Windows display language when the game has it, else English. Applies at the next start of the game." },
+        hint: 'settings.gameLang.hint' },
     ],
   },
   {
-    title: 'Frame rate', icon: 'gauge', file: 'game',
+    title: 'settings.sec.frameRate', icon: 'gauge', file: 'game',
     fields: [
-      { id: 'fps60', type: 'toggle', label: '60 fps gameplay', sec: 'fefw', key: 'fps60', def: '0', hint: 'The game runs at 30 on the console. Dialogue text also types twice as fast.' },
-      { id: 'fps120', type: 'toggle', label: '120 fps gameplay', sec: 'fefw', key: 'fps120', def: '0', hint: 'Wins over 60 fps. Needs a fast CPU.' },
-      { id: 'smooth_step', type: 'toggle', label: 'Exact game clock', sec: 'fefw', key: 'smooth_step', def: '0', hint: 'Keeps game time exact when frame times vary. On by default with 60 and 120 fps.' },
-      { id: 'frame_gen', type: 'select', label: 'Frame generation', sec: 'dlss', key: 'frame_gen', def: '0',
-        options: [['0', 'Off'], ['dlss', 'NVIDIA DLSS Frame Generation (RTX 40 series)'], ['fsr3', 'AMD FSR 3 (needs amd_fidelityfx_vk.dll)']],
-        hint: 'Keep vsync off with frame generation. DLSS frame generation also needs hardware GPU scheduling and an RTX 40 series or newer card.' },
-      { id: 'frame_gen_dll', type: 'text', label: 'FSR 3 frame generation DLL', sec: 'dlss', key: 'frame_gen_dll', def: '', placeholder: 'path to amd_fidelityfx_vk.dll (FidelityFX SDK v1.1.4)' },
+      { id: 'fps60', type: 'toggle', label: 'settings.fps60.label', sec: 'fefw', key: 'fps60', def: '0', hint: 'settings.fps60.hint' },
+      { id: 'fps120', type: 'toggle', label: 'settings.fps120.label', sec: 'fefw', key: 'fps120', def: '0', hint: 'settings.fps120.hint' },
+      { id: 'smooth_step', type: 'toggle', label: 'settings.smoothStep.label', sec: 'fefw', key: 'smooth_step', def: '0', hint: 'settings.smoothStep.hint' },
+      { id: 'frame_gen', type: 'select', label: 'settings.frameGen.label', sec: 'dlss', key: 'frame_gen', def: '0',
+        options: [['0', 'settings.frameGen.off'], ['dlss', 'settings.frameGen.dlss'], ['fsr3', 'settings.frameGen.fsr3']],
+        hint: 'settings.frameGen.hint' },
+      { id: 'frame_gen_dll', type: 'text', label: 'settings.frameGenDll.label', sec: 'dlss', key: 'frame_gen_dll', def: '', placeholder: 'settings.frameGenDll.placeholder' },
     ],
   },
   {
-    title: 'Window', icon: 'monitor', file: 'controls',
+    title: 'settings.sec.window', icon: 'monitor', file: 'controls',
     fields: [
-      { id: 'window_mode', type: 'select', label: 'Window mode', sec: 'display', key: 'window_mode', def: 'windowed',
-        options: [['windowed', 'Windowed'], ['borderless', 'Borderless fullscreen'], ['exclusive', 'Exclusive fullscreen']], hint: 'Alt+Enter switches while playing.' },
-      { id: 'size', type: 'size', label: 'Window size', sec: 'display', keys: ['width', 'height'], def: ['1280', '720'] },
-      { id: 'fps_limit', type: 'autonum', label: 'Frame rate limit', sec: 'display', key: 'fps_limit', def: 'auto',
-        min: 0, max: 1000, numDefault: 60, unit: 'fps', autoLabel: 'Auto', hint: 'Auto follows the display refresh rate. 0 is unlimited.' },
-      { id: 'vsync', type: 'toggle', label: 'VSync', sec: 'display', key: 'vsync', def: '1' },
-      { id: 'fsr_dll', type: 'text', label: 'FSR 3.1 upscaler DLL folder', sec: 'upscale', key: 'fsr_dll', def: '', placeholder: 'folder with amd_fidelityfx_upscaler_vk.dll' },
+      { id: 'window_mode', type: 'select', label: 'settings.windowMode.label', sec: 'display', key: 'window_mode', def: 'windowed',
+        options: [['windowed', 'settings.windowMode.windowed'], ['borderless', 'settings.windowMode.borderless'], ['exclusive', 'settings.windowMode.exclusive']],
+        hint: 'settings.windowMode.hint' },
+      { id: 'size', type: 'size', label: 'settings.windowSize.label', sec: 'display', keys: ['width', 'height'], def: ['1280', '720'] },
+      { id: 'fps_limit', type: 'autonum', label: 'settings.fpsLimit.label', sec: 'display', key: 'fps_limit', def: 'auto',
+        min: 0, max: 1000, numDefault: 60, unit: 'settings.fpsLimit.unit', autoLabel: 'settings.fpsLimit.auto', hint: 'settings.fpsLimit.hint' },
+      { id: 'vsync', type: 'toggle', label: 'settings.vsync.label', sec: 'display', key: 'vsync', def: '1' },
+      { id: 'fsr_dll', type: 'text', label: 'settings.fsrDll.label', sec: 'upscale', key: 'fsr_dll', def: '', placeholder: 'settings.fsrDll.placeholder' },
     ],
   },
   {
-    title: 'Sound and controls', icon: 'volume-2', file: 'controls',
+    title: 'settings.sec.sound', icon: 'volume-2', file: 'controls',
     fields: [
-      { id: 'volume', type: 'range', label: 'Master volume', sec: 'audio', key: 'volume', def: '1.0' },
-      { id: 'mute_unfocused', type: 'toggle', label: 'Mute when the window is in the background', sec: 'audio', key: 'mute_unfocused', def: '0' },
-      { id: 'prompt_style', type: 'select', label: 'Button prompts', sec: 'prompts', key: 'style', def: 'auto',
-        options: [['auto', 'Automatic (last device used)'], ['switch', "Switch (the game's own)"], ['xbox', 'Xbox'], ['playstation', 'PlayStation'], ['keyboard', 'Keyboard and mouse']],
-        hint: 'Keyboard: WASD move, arrows or IJKL camera, Enter or Space A, Esc or Backspace B, R X, F Y, Q L, E R, Z ZL, C ZR, Tab +, M -, 1-4 d-pad. F1 > Controls lists them; change them in [bindings.all] of controls.ini.' },
-      // The runtime already maps the face buttons by label or by position ([pad] label_abxy in controls.ini,
-      // pad_map.cpp): 1 keeps the printed labels, 0 follows the positions. The prompts follow the same key,
-      // so no extra rule is needed here.
-      { id: 'face_buttons', type: 'select', label: 'Face buttons', sec: 'pad', key: 'label_abxy', def: '1',
-        options: [['1', 'By label (Xbox A = Switch A)'], ['0', 'By position (bottom = Switch B)']],
-        hint: 'How the four face buttons are mapped. By label, the button printed A is the Switch A, as on an Xbox pad. By position, the bottom button is the Switch B, as on a Switch pad. The button icons follow the layout.' },
+      { id: 'volume', type: 'range', label: 'settings.volume.label', sec: 'audio', key: 'volume', def: '1.0', unit: 'settings.volume.unit' },
+      { id: 'mute_unfocused', type: 'toggle', label: 'settings.muteUnfocused.label', sec: 'audio', key: 'mute_unfocused', def: '0' },
+      { id: 'prompt_style', type: 'select', label: 'settings.promptStyle.label', sec: 'prompts', key: 'style', def: 'auto',
+        options: [['auto', 'settings.promptStyle.auto'], ['switch', 'settings.promptStyle.switch'], ['xbox', 'settings.promptStyle.xbox'],
+          ['playstation', 'settings.promptStyle.playstation'], ['keyboard', 'settings.promptStyle.keyboard']],
+        hint: 'settings.promptStyle.hint' },
+      // [pad] label_abxy: which physical button the Switch's A is mapped from. The button prompts follow it (runtime/gfx/play/prompt_resolve.cpp).
+      { id: 'face_buttons', type: 'select', label: 'settings.faceButtons.label', sec: 'pad', key: 'label_abxy', def: '1',
+        options: [['1', 'settings.faceButtons.label_'], ['0', 'settings.faceButtons.position']],
+        hint: 'settings.faceButtons.hint' },
     ],
   },
   {
-    title: 'Input, saves and log', icon: 'folder', file: 'game',
+    title: 'settings.sec.input', icon: 'folder', file: 'game',
     fields: [
-      { id: 'jc2_mouse', type: 'select', label: 'Joy-Con 2 mouse from the PC mouse', sec: 'input', key: 'jc2_mouse', def: 'off', options: [['auto', 'Automatic'], ['on', 'On'], ['off', 'Off']] },
-      { id: 'save_dir', type: 'path', label: 'Save folder', sec: 'fs', key: 'save_dir', def: '', placeholder: 'save/ in the run folder' },
-      { id: 'log_level', type: 'select', label: 'Log detail', sec: 'log', key: 'level', def: 'info', options: [['error', 'Errors'], ['warn', 'Warnings'], ['info', 'Normal'], ['debug', 'Debug']] },
+      { id: 'jc2_mouse', type: 'select', label: 'settings.jc2Mouse.label', sec: 'input', key: 'jc2_mouse', def: 'off',
+        options: [['auto', 'settings.jc2Mouse.auto'], ['on', 'settings.jc2Mouse.on'], ['off', 'settings.jc2Mouse.off']] },
+      { id: 'save_dir', type: 'path', label: 'settings.saveDir.label', sec: 'fs', key: 'save_dir', def: '', placeholder: 'settings.saveDir.placeholder' },
+      { id: 'log_level', type: 'select', label: 'settings.logLevel.label', sec: 'log', key: 'level', def: 'info',
+        options: [['error', 'settings.logLevel.error'], ['warn', 'settings.logLevel.warn'], ['info', 'settings.logLevel.info'], ['debug', 'settings.logLevel.debug']] },
     ],
   },
   {
-    title: 'Launcher', icon: 'wrench', file: 'config',
+    title: 'settings.sec.launcher', icon: 'wrench', file: 'config',
     fields: [
-      { id: 'repo_dir', type: 'path', label: 'Repository folder', sec: '', key: 'repo_dir', def: '', placeholder: "found from the launcher's location", hint: 'The checkout of this project that setup builds in.' },
-      { id: 'game_dir', type: 'path', label: 'Run folder', sec: '', key: 'game_dir', def: '', placeholder: '<repository>/work/play', hint: 'Holds fefw.ini, controls.ini, fefw.log and the saves.' },
-      { id: 'jobs', type: 'number', label: 'Build processes', sec: '', key: 'jobs', def: '0', min: 0, max: 256, hint: '0: one fewer than your CPU threads. Lower it if the PC runs out of memory while building.' },
-      { id: 'minimize_on_play', type: 'toggle', label: 'Minimise while the game runs', sec: '', key: 'minimize_on_play', def: '0' },
+      // The launcher's own interface language: kept in launcher.json, applied at once, no file patching involved.
+      { id: 'lang', type: 'language', label: 'settings.lang.label', hint: 'settings.lang.hint' },
+      { id: 'repo_dir', type: 'path', label: 'settings.repoDir.label', sec: '', key: 'repo_dir', def: '', placeholder: 'settings.repoDir.placeholder', hint: 'settings.repoDir.hint' },
+      { id: 'game_dir', type: 'path', label: 'settings.gameDir.label', sec: '', key: 'game_dir', def: '', placeholder: 'settings.gameDir.placeholder', hint: 'settings.gameDir.hint' },
+      { id: 'jobs', type: 'number', label: 'settings.jobs.label', sec: '', key: 'jobs', def: '0', min: 0, max: 256, hint: 'settings.jobs.hint' },
+      { id: 'minimize_on_play', type: 'toggle', label: 'settings.minimizeOnPlay.label', sec: '', key: 'minimize_on_play', def: '0' },
     ],
   },
 ];
@@ -114,6 +124,9 @@ const SECTIONS = [
 const truthy = (v) => ['1', 'true', 'yes', 'on'].includes(String(v).trim().toLowerCase());
 const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
 const fwd = (s) => String(s).trim().replace(/\\/g, '/');
+
+/** An option label: a dotted name is a key, anything else ("720p", "DLAA") is shown as written. */
+const optName = (label) => (String(label).includes('.') ? t(label) : label);
 
 export async function render(el, ctx) {
   const [cfg, status] = await Promise.all([api('get_config'), api('game_status')]);
@@ -136,6 +149,7 @@ export async function render(el, ctx) {
     path: (f) => get(f, f.key, f.def),
     text: (f) => get(f, f.key, f.def),
     number: (f) => String(get(f, f.key, f.def)),
+    language: () => getLang(),
   };
   const WRITE = {
     select: (f, x) => [[f.sec, f.key, x]],
@@ -149,6 +163,7 @@ export async function render(el, ctx) {
     path: (f, x) => [[f.sec, f.key, fwd(x)]],
     text: (f, x) => [[f.sec, f.key, String(x).trim()]],
     number: (f, x) => [[f.sec, f.key, String(clamp(parseInt(x, 10) || 0, f.min, f.max))]],
+    language: () => [],
   };
 
   const all = SECTIONS.flatMap((s) => s.fields.map((f) => ({ ...f, file: s.file })));
@@ -164,45 +179,114 @@ export async function render(el, ctx) {
   const dis = (f) => (exists[f.file] ? '' : 'disabled');
   const CONTROL = {
     select: (f, x) => {
-      const opts = f.options.some(([v]) => v === x) ? f.options : [...f.options, [x, x]];
-      return `<select data-f="${f.id}" ${dis(f)}>${opts.map(([v, l]) => `<option value="${esc(v)}" ${v === x ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
+      const opts = f.options.some(([v]) => String(v) === String(x)) ? f.options : [...f.options, [x, x]];
+      return `<select data-f="${f.id}" ${dis(f)}>${opts.map(([v, l]) => `<option value="${esc(v)}" ${String(v) === String(x) ? 'selected' : ''}>${esc(optName(l))}</option>`).join('')}</select>`;
     },
-    toggle: (f, x) => `<label class="switch"><input type="checkbox" data-f="${f.id}" ${x ? 'checked' : ''} ${dis(f)}>${x ? 'On' : 'Off'}</label>`,
+    toggle: (f, x) => `<label class="switch"><input type="checkbox" data-f="${f.id}" ${x ? 'checked' : ''} ${dis(f)}>${esc(t(x ? f.onLabel || 'common.on' : f.offLabel || 'common.off'))}</label>`,
     size: (f, x) => `<input type="number" data-f="${f.id}" data-part="w" min="320" max="16384" value="${esc(x.w)}" ${dis(f)}><span class="unit">x</span><input type="number" data-f="${f.id}" data-part="h" min="320" max="16384" value="${esc(x.h)}" ${dis(f)}>`,
-    autonum: (f, x) => `<label class="switch"><input type="checkbox" data-f="${f.id}" data-part="auto" ${x.auto ? 'checked' : ''} ${dis(f)}>${esc(f.autoLabel)}</label><input type="number" data-f="${f.id}" data-part="num" min="${f.min}" max="${f.max}" value="${esc(x.num)}" ${x.auto || !exists[f.file] ? 'disabled' : ''}><span class="unit">${esc(f.unit)}</span>`,
-    range: (f, x) => `<input type="range" data-f="${f.id}" min="0" max="100" step="1" value="${x}" ${dis(f)}><span class="unit" data-readout="${f.id}" style="min-width: 3.5ch; text-align: right">${x}%</span>`,
-    text: (f, x) => `<input type="text" data-f="${f.id}" spellcheck="false" placeholder="${esc(f.placeholder || '')}" value="${esc(x)}" ${dis(f)}>`,
+    autonum: (f, x) => `<label class="switch"><input type="checkbox" data-f="${f.id}" data-part="auto" ${x.auto ? 'checked' : ''} ${dis(f)}>${esc(optName(f.autoLabel))}</label><input type="number" data-f="${f.id}" data-part="num" min="${f.min}" max="${f.max}" value="${esc(x.num)}" ${x.auto || !exists[f.file] ? 'disabled' : ''}><span class="unit">${esc(optName(f.unit))}</span>`,
+    range: (f, x) => `<input type="range" data-f="${f.id}" min="0" max="100" step="1" value="${x}" ${dis(f)}><span class="unit" data-readout="${f.id}" style="min-width: 3.5ch; text-align: right">${x}${esc(optName(f.unit || '%'))}</span>`,
+    text: (f, x) => `<input type="text" data-f="${f.id}" spellcheck="false" placeholder="${esc(f.placeholder ? optName(f.placeholder) : '')}" value="${esc(x)}" ${dis(f)}>`,
     number: (f, x) => `<input type="number" data-f="${f.id}" min="${f.min}" max="${f.max}" value="${esc(x)}" ${dis(f)}>`,
-    path: (f, x) => `<input type="text" data-f="${f.id}" spellcheck="false" placeholder="${esc(f.placeholder || '')}" value="${esc(x)}" ${dis(f)}><button class="btn" data-browse="${f.id}" ${dis(f)}>${icon('folder-open')}Browse</button>`,
+    path: (f, x) => `<input type="text" data-f="${f.id}" spellcheck="false" placeholder="${esc(f.placeholder ? optName(f.placeholder) : '')}" value="${esc(x)}" ${dis(f)}><button class="btn" data-browse="${f.id}" ${dis(f)}>${icon('folder-open')}${esc(t('common.browse'))}</button>`,
+    language: (f, x) => `<select data-f="${f.id}">${listLangs().map((l) => `<option value="${esc(l.code)}" ${l.code === x ? 'selected' : ''}>${esc(l.name)}</option>`).join('')}</select>`,
   };
 
   const fieldHtml = (f) => `
     <div class="field">
-      <label class="name">${esc(f.label)}${f.hint ? `<span class="hint">${esc(f.hint)}</span>` : ''}</label>
+      <label class="name">${esc(t(f.label))}${f.hint ? `<span class="hint">${esc(t(f.hint))}</span>` : ''}</label>
       <div class="control">${CONTROL[f.type](f, model[f.id])}</div>
     </div>`;
+
+  const barText = (n) => (n ? (n > 1 ? t('common.unsavedMany', { count: n }) : t('common.unsavedOne')) : t('common.noChanges'));
 
   function draw() {
     const n = dirtyFields().length;
     el.innerHTML = `
       <div class="page">
         <div class="hero">
-          <h1>Settings</h1>
-          <p class="dim">These edit fefw.ini and controls.ini in the run folder (<code>${esc(data.game_dir)}</code>). Other keys and comments in those files are left alone. Every key: runtime/docs/CONFIG.md.</p>
+          <h1>${esc(t('settings.title'))}</h1>
+          <p class="dim">${esc(t('settings.introBefore'))}<code>${esc(data.game_dir)}</code>${esc(t('settings.introAfter'))}</p>
         </div>
-        ${status.state === 'running' ? `<div class="banner warn">${icon('triangle-alert')}<div>The game is running. Most changes apply at the next start, and the game may overwrite controls.ini when it exits.</div></div>` : ''}
-        ${!data.controls_exists ? `<div class="banner info">${icon('info')}<div>controls.ini does not exist yet in <code>${esc(data.game_dir)}</code>. The game creates it on its first start, so Window and Sound and controls become editable after that. The other options work now.</div></div>` : ''}
-        ${SECTIONS.map((s) => `<div class="card"><h2>${icon(s.icon)}${esc(s.title)}</h2>${s.fields.map((f) => fieldHtml({ ...f, file: s.file })).join('')}</div>`).join('')}
+        ${status.state === 'running' ? `<div class="banner warn">${icon('triangle-alert')}<div>${esc(t('settings.gameRunning'))}</div></div>` : ''}
+        ${!data.controls_exists ? `<div class="banner info">${icon('info')}<div>${esc(t('settings.noControlsBefore'))}<code>${esc(data.game_dir)}</code>${esc(t('settings.noControlsAfter'))}</div></div>` : ''}
+        ${SECTIONS.map((s) => `<div class="card"><h2>${icon(s.icon)}${esc(t(s.title))}</h2>${s.fields.map((f) => fieldHtml({ ...f, file: s.file })).join('')}</div>`).join('')}
         <div class="savebar">
-          <span class="dim">${n ? `${n} unsaved change${n > 1 ? 's' : ''}` : 'No changes'}</span>
+          <span class="dim">${esc(barText(n))}</span>
           <div class="row">
-            <button class="btn quiet" id="revert" ${n ? '' : 'disabled'}>${icon('undo-2')}Revert</button>
-            <button class="btn primary" id="save" ${n ? '' : 'disabled'}>${icon('save')}Save</button>
+            <button class="btn quiet" id="revert" ${n ? '' : 'disabled'}>${icon('undo-2')}${esc(t('common.revert'))}</button>
+            <button class="btn primary" id="save" ${n ? '' : 'disabled'}>${icon('save')}${esc(t('common.save'))}</button>
           </div>
         </div>
       </div>`;
     refreshIcons();
     bind();
+  }
+
+  /** Puts the (unsaved) model back into freshly drawn markup. */
+  function applyModel() {
+    for (const f of all) {
+      const x = model[f.id];
+      if (f.type === 'size') {
+        const w = el.querySelector(`[data-f="${f.id}"][data-part="w"]`);
+        const h = el.querySelector(`[data-f="${f.id}"][data-part="h"]`);
+        if (w) w.value = x.w;
+        if (h) h.value = x.h;
+      } else if (f.type === 'autonum') {
+        const a = el.querySelector(`[data-f="${f.id}"][data-part="auto"]`);
+        const num = el.querySelector(`[data-f="${f.id}"][data-part="num"]`);
+        if (a) a.checked = x.auto;
+        if (num) {
+          num.value = x.num;
+          num.disabled = x.auto || !exists[f.file];
+        }
+      } else if (f.type === 'range') {
+        const r = el.querySelector(`[data-f="${f.id}"]`);
+        if (r) r.value = x;
+        const out = el.querySelector(`[data-readout="${f.id}"]`);
+        if (out) out.textContent = `${x}${optName(f.unit || '%')}`;
+      } else if (f.type === 'toggle') {
+        const c = el.querySelector(`[data-f="${f.id}"]`);
+        if (c) c.checked = !!x;
+      } else {
+        const c = el.querySelector(`[data-f="${f.id}"]`);
+        if (c) c.value = x;
+      }
+    }
+    updateBar();
+  }
+
+  /**
+   * Switches the interface language: saved at once, then the page is redrawn in the new language with the
+   * unsaved edits kept. `draw()` rebuilds the markup from `model`, and `applyModel()` puts the edited values
+   * back into it, so nothing has to be read from disk again. Only the shell (navigation, window title) is
+   * repainted; the page itself is not re-rendered, or the edits kept here would be dropped with this closure.
+   */
+  async function liveLang(code) {
+    if (code === getLang()) return;
+    const keep = { ...model };
+    try {
+      await api('save_config', { config: { ...cfg, lang: code } });
+    } catch (e) {
+      toast(errText(e), 'error');
+      return;
+    }
+    cfg.lang = code;
+    // Keep the in-game F1 menu in step: it reads [gfx] ui_language from fefw.ini.
+    // zh maps to the zh pack; any other launcher language falls back to English there.
+    try {
+      await api('write_settings', { edits: [{ file: 'game', section: 'gfx', key: 'ui_language', value: code === 'zh' ? 'zh' : 'auto' }] });
+    } catch (e) { /* fefw.ini may not exist yet; the menu keeps its current language */ }
+    await setLang(code, () => {
+      for (const id of Object.keys(keep)) model[id] = keep[id];
+      // The switch was saved above, so it is not a pending edit: the picker shows the new language and the
+      // save bar does not count it. Everything else keeps the value it had before the switch.
+      model.lang = code;
+      orig.lang = JSON.stringify(code);
+      draw();
+      applyModel();
+      ctx.shell(); // navigation labels and the window title; the page keeps the edits above
+    });
   }
 
   function bind() {
@@ -214,8 +298,12 @@ export async function render(el, ctx) {
         const v = input.type === 'checkbox' ? input.checked : input.value;
         if (part) model[f.id] = { ...model[f.id], [part]: v };
         else model[f.id] = f.type === 'range' ? parseInt(v, 10) : v;
+        if (f.type === 'language') {
+          liveLang(v);
+          return;
+        }
         if (f.type === 'range') {
-          el.querySelector(`[data-readout="${f.id}"]`).textContent = `${model[f.id]}%`;
+          el.querySelector(`[data-readout="${f.id}"]`).textContent = `${model[f.id]}${optName(f.unit || '%')}`;
           updateBar();
         } else if (input.type === 'text' || input.type === 'number') {
           updateBar();
@@ -228,7 +316,7 @@ export async function render(el, ctx) {
     el.querySelectorAll('[data-browse]').forEach((b) =>
       b.addEventListener('click', async () => {
         const f = byId[b.dataset.browse];
-        const picked = await api('pick_folder', { title: `Choose: ${f.label}`, start: model[f.id] || null });
+        const picked = await api('pick_folder', { title: t('common.choose', { label: t(f.label) }), start: model[f.id] || null });
         if (picked) {
           model[f.id] = picked;
           draw();
@@ -245,7 +333,8 @@ export async function render(el, ctx) {
   function updateBar() {
     const n = dirtyFields().length;
     const bar = el.querySelector('.savebar');
-    bar.querySelector('span').textContent = n ? `${n} unsaved change${n > 1 ? 's' : ''}` : 'No changes';
+    if (!bar) return;
+    bar.querySelector('span').textContent = barText(n);
     bar.querySelector('#save').disabled = !n;
     bar.querySelector('#revert').disabled = !n;
   }
@@ -265,7 +354,7 @@ export async function render(el, ctx) {
     try {
       if (edits.length) await api('write_settings', { edits });
       if (JSON.stringify(cfgNew) !== JSON.stringify(cfg)) await api('save_config', { config: cfgNew });
-      toast('Settings saved.', 'ok');
+      toast(t('common.settingsSaved'), 'ok');
       ctx.go('settings');
     } catch (e) {
       toast(errText(e), 'error');
