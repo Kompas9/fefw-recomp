@@ -322,7 +322,11 @@ pub fn install(install: &Path, top: &Path, old: &Path) -> Result<(), String> {
     for e in fs::read_dir(top).map_err(|e| e.to_string())?.flatten() {
         if e.path().is_dir() {
             let name = PathBuf::from(e.file_name());
-            stale.extend(walk(&install.join(&name)).into_iter().map(|r| name.join(r)).filter(|r| !new_set.contains(r)));
+            // locales/ holds the shipped language tables, but the player may have put their own translation there too:
+            // a table the package does not ship is not stale, it is theirs.
+            if name.to_string_lossy().eq_ignore_ascii_case("locales") {
+                continue;
+            }            stale.extend(walk(&install.join(&name)).into_iter().map(|r| name.join(r)).filter(|r| !new_set.contains(r)));
         }
     }
     // (relative path, the old file was moved to old/, a new file was moved in)
@@ -343,6 +347,11 @@ pub fn install(install: &Path, top: &Path, old: &Path) -> Result<(), String> {
         for rel in &new_files {
             let target = install.join(rel);
             let had = target.exists();
+            // a language table is added, never replaced: the copy in the install folder may be the player's own.
+            let shared = rel.components().next().is_some_and(|c| c.as_os_str().to_string_lossy().eq_ignore_ascii_case("locales"));
+            if had && shared {
+                continue;
+            }
             if had {
                 aside(rel)?;
             }
@@ -455,6 +464,28 @@ mod tests {
         assert_eq!(get(inst.join("save/x")), "player save");
         assert_eq!(get(old.join("fefw_rt.dll")), "old dll");
         assert_eq!(get(old.join("tools/gone.py")), "stale");
+    }
+
+    #[test]
+    fn install_adds_language_tables_without_replacing_the_players_own() {
+        let (inst, top, old) = (tmp("i3"), tmp("t3"), tmp("o3").join("old"));
+        put(inst.join("locales/zh.ini"), "the player's own zh");
+        put(inst.join("locales/mine.ini"), "a table the player wrote");
+        put(top.join("locales/zh.ini"), "the shipped zh");
+        put(top.join("fefw_rt.dll"), "new dll");
+        install(&inst, &top, &old).unwrap();
+        // the shipped table does not overwrite the copy already there
+        assert_eq!(get(inst.join("locales/zh.ini")), "the player's own zh");
+        // and a table only the player has is not treated as stale
+        assert_eq!(get(inst.join("locales/mine.ini")), "a table the player wrote");
+        assert_eq!(get(inst.join("fefw_rt.dll")), "new dll");
+
+        // with no copy there yet, the shipped table is put in place
+        let (inst2, top2, old2) = (tmp("i4"), tmp("t4"), tmp("o4").join("old"));
+        put(top2.join("locales/zh.ini"), "the shipped zh");
+        put(top2.join("fefw_rt.dll"), "new dll");
+        install(&inst2, &top2, &old2).unwrap();
+        assert_eq!(get(inst2.join("locales/zh.ini")), "the shipped zh");
     }
 
     #[test]

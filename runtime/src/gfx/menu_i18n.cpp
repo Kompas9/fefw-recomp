@@ -10,6 +10,7 @@
 #include <windows.h>
 
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <string>
 #include <unordered_map>
@@ -43,12 +44,57 @@ std::string trim(const std::string& s) {
     return s.substr(a, b - a + 1);
 }
 
+bool is_conversion(char c) { return c != '\0' && std::strchr("diouxXeEfFgGaAcsp", c) != nullptr; }
+
+// The printf conversions of a string, in order, each as "<length><conversion>" ("%d" gives "d", "%ls" gives "ls").
+// A translation is handed to ImGui::Text and friends as the format string, so its conversions have to match the
+// English key: one that drops a "%d" or turns it into "%s" makes the call read the wrong arguments.
+// "%%" is a literal percent and takes no argument. A '%' that is not followed by a real conversion is taken as a
+// literal too: several display strings are plain prose with a percent in them ("1% low", a translated "50% off")
+// and never reach printf, so they must not be dropped for it.
+std::string conversions(const std::string& s) {
+    std::string out;
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] != '%') continue;
+        const size_t pct = i;
+        ++i;
+        if (i >= s.size() || s[i] == '%') continue;
+        const unsigned char next = static_cast<unsigned char>(s[i]);
+        if (next >= 0x80 || next == ' ') continue;   // prose, not a conversion
+        size_t j = i;
+        while (j < s.size() && s[j] != '\0' && std::strchr("-+#0", s[j]) != nullptr) ++j;
+        if (j < s.size() && s[j] == '*')
+            ++j;
+        else
+            while (j < s.size() && s[j] >= '0' && s[j] <= '9') ++j;
+        if (j < s.size() && s[j] == '.') {
+            ++j;
+            if (j < s.size() && s[j] == '*')
+                ++j;
+            else
+                while (j < s.size() && s[j] >= '0' && s[j] <= '9') ++j;
+        }
+        const size_t len = j;
+        while (j < s.size() && s[j] != '\0' && std::strchr("hlLjzt", s[j]) != nullptr) ++j;
+        if (j < s.size() && is_conversion(s[j])) {
+            out.append(s, len, j - len);
+            out.push_back(s[j]);
+            out.push_back(';');
+            i = j;
+            continue;
+        }
+        i = pct;   // not a conversion after all: the percent stays a literal
+    }
+    return out;
+}
+
 // "key = value" lines; the value keeps inner spaces, the key is trimmed. UTF-8 in, UTF-8 out (ImGui is UTF-8 aware).
 void load_file(const std::string& path) {
     std::ifstream f(path.c_str(), std::ios::binary);
     if (!f) return;
     std::string line;
     size_t n = 0;
+    size_t dropped = 0;
     while (std::getline(f, line)) {
         if (!line.empty() && line.back() == '\r') line.pop_back();
         if (!line.empty() && (line[0] == '\xef' && line.size() >= 3 && (unsigned char)line[1] == '\xbb' &&
@@ -68,10 +114,19 @@ void load_file(const std::string& path) {
         const std::string key = trim(t.substr(0, eq));
         std::string value = trim(t.substr(eq + skip));
         if (key.empty() || value.empty()) continue;
+        // A translation is used as the printf format string, so its conversions have to match the English key.
+        // One that does not is dropped: the line stays English instead of reading the wrong arguments.
+        if (conversions(key) != conversions(value)) {
+            ++dropped;
+            NXLOG_W(kTag, "dropping the translation of \"%s\": its format specifiers differ from the key",
+                    key.c_str());
+            continue;
+        }
         table()[key] = value;
         ++n;
     }
     NXLOG_I(kTag, "loaded %zu translations from %s", n, path.c_str());
+    if (dropped > 0) NXLOG_W(kTag, "dropped %zu translations whose format specifiers did not match", dropped);
 }
 
 } // namespace

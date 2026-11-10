@@ -23,6 +23,19 @@ English source string = Translated string
   contain an equals sign.
 - A missing key, a partial table, or a broken file is safe: the menu simply
   falls back to the English string.
+- Format specifiers (`%s`, `%d`, `%.1f`, `%%`, ...) in a translation must match
+  the English key in type and order. The menu hands some strings to printf, so
+  an entry whose specifiers differ is dropped at load, stays English, and is
+  listed in the log. `%%` is a literal `%` and needs no counterpart beyond the
+  key's own `%%`.
+
+## Where the tables live
+
+`make-release.ps1` puts this folder into the release package, and the launcher
+copies any `<name>.ini` it finds there into the run folder
+(`<game folder>/locales/`) before the first start and before every Play. A file
+that is already there is left alone, so a translation the player edited or
+added wins over the shipped one.
 
 ## Font
 
