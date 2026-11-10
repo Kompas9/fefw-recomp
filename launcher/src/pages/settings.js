@@ -57,7 +57,7 @@ const SECTIONS = [
     fields: [
       { id: 'fps60', type: 'toggle', label: '60 fps gameplay', sec: 'fefw', key: 'fps60', def: '0', hint: 'The game runs at 30 on the console. Dialogue text also types twice as fast.' },
       { id: 'fps120', type: 'toggle', label: '120 fps gameplay', sec: 'fefw', key: 'fps120', def: '0', hint: 'Wins over 60 fps. Needs a fast CPU.' },
-      { id: 'smooth_step', type: 'toggle', label: 'Exact game clock', sec: 'fefw', key: 'smooth_step', def: '0', hint: 'Keeps game time exact when frame times vary. On by default with 120 fps.' },
+      { id: 'smooth_step', type: 'toggle', label: 'Exact game clock', sec: 'fefw', key: 'smooth_step', def: '0', hint: 'Keeps game time exact when frame times vary. On by default with 60 and 120 fps.' },
       { id: 'frame_gen', type: 'select', label: 'Frame generation', sec: 'dlss', key: 'frame_gen', def: '0',
         options: [['0', 'Off'], ['dlss', 'NVIDIA DLSS Frame Generation (RTX 40 series)'], ['fsr3', 'AMD FSR 3 (needs amd_fidelityfx_vk.dll)']],
         hint: 'Keep vsync off with frame generation. DLSS frame generation also needs hardware GPU scheduling and an RTX 40 series or newer card.' },

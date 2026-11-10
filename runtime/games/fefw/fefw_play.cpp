@@ -265,7 +265,7 @@ void play_install(uint64_t base, play::GameHost*, const play::Settings&) {
     s.fps60 = config_get_bool("fefw", "fps60", false);
     s.fps120 = config_get_bool("fefw", "fps120", false);
     if (s.fps60 || s.fps120) s.hook = hook_add_inline(base + kGameplayTargetStore, &hook_gameplay_target);
-    const bool smooth = s.smooth = config_get_bool("fefw", "smooth_step", s.fps120);
+    const bool smooth = s.smooth = config_get_bool("fefw", "smooth_step", s.fps60 || s.fps120);
     const std::string step_csv = config_get_str("fefw", "step_csv", "");
     if (!step_csv.empty()) s.step_csv = std::fopen(step_csv.c_str(), "w");
     if (s.step_csv) {

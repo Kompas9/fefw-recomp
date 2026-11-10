@@ -746,7 +746,7 @@ void framerate_page(UiHost& host, Menu& m, const play::LiveStatus& live, gfx::Ov
         } else {
             ImGui::TextDisabled("set by the environment (%s / %s)", config_env_name("fefw", "fps60").c_str(), config_env_name("fefw", "fps120").c_str());
         }
-        constexpr const char* kSmooth[] = {"Auto (on at 120)", "On", "Off"};
+        constexpr const char* kSmooth[] = {"Auto (on at 60 and 120)", "On", "Off"};
         constexpr const char* kSmoothVals[] = {"auto", "1", "0"};
         ini_combo_row(m, *ini_key("fefw", "smooth_step"), "Smooth time step",
                       "Keeps the game clock exact when frames are uneven: the game's step plus a quarter of the time it still owes.", kSmooth,
