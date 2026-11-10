@@ -37,6 +37,9 @@ done
 ZIG_VERSION=0.17.0
 ZIG_SHA256=1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026
 PYTHON_MINOR=3.13
+PYTHON_TAG=20261026   # python-build-standalone release
+PYTHON_BUILD=cpython-3.13.18+$PYTHON_TAG-x86_64-unknown-linux-gnu-install_only.tar.gz
+PYTHON_SHA256=126343c54daff4068efc1ac269518d0cc202d57857794948103dd1454e8881be
 RYUBING_GIT=https://git.ryujinx.app/ryubing/ryujinx.git
 RYUBING_COMMIT=a82350bb774f70fcbd41c9987bf67a3775409963
 
@@ -97,17 +100,11 @@ echo "$ZIG_SHA256  $zig" | sha256sum -c --quiet || { rm -f "$zig"; echo "sha256 
 mkdir -p "$PKG/tools/build/zig"
 tar xf "$zig" -C "$PKG/tools/build/zig" --strip-components=1 --exclude='*/doc/*'
 
-echo "--- Python $PYTHON_MINOR (python-build-standalone)"
-url=$(curl -fsSL https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest | python3 -c '
-import json, re, sys
-minor = sys.argv[1].replace(".", r"\.")
-pat = re.compile(r"^cpython-" + minor + r"\.\d+\+\d+-x86_64-unknown-linux-gnu-install_only\.tar\.gz$")
-names = [a for a in json.load(sys.stdin)["assets"] if pat.match(a["name"])]
-print(names[0]["browser_download_url"] if names else "")' "$PYTHON_MINOR")
-[ -n "$url" ] || { echo "no CPython $PYTHON_MINOR build in python-build-standalone's latest release" >&2; exit 1; }
-py="$CACHE/$(basename "$url" | sed 's/%2B/+/g')"
-[ -f "$py" ] || curl -fsSL -o "$py" "$url"
-echo "$(basename "$py")"
+echo "--- Python ($PYTHON_BUILD)"
+py="$CACHE/$PYTHON_BUILD"
+[ -f "$py" ] || curl -fsSL -o "$py.part" "https://github.com/astral-sh/python-build-standalone/releases/download/$PYTHON_TAG/${PYTHON_BUILD/+/%2B}"
+[ -f "$py" ] || mv "$py.part" "$py"
+echo "$PYTHON_SHA256  $py" | sha256sum -c --quiet || { rm -f "$py"; echo "sha256 mismatch: $py" >&2; exit 1; }
 tar xf "$py" -C "$PKG/tools"   # unpacks as python/
 "$PKG/tools/python/bin/python3" -m pip install --quiet --no-cache-dir --disable-pip-version-check capstone==5.0.9 lz4 zbic zstandard
 "$PKG/tools/python/bin/python3" -I -c "import zbic, lz4, capstone, zstandard"
