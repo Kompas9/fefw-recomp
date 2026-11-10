@@ -45,6 +45,7 @@
 #include "nxrt/log.h"
 #include "nxrt/lowlat.h"
 #include "nxrt/overlay.h"
+#include "nxrt/menu_i18n.h"
 #include "nxrt/platform.h"
 #include "play_types.h"
 #include "play_ui.h"
@@ -59,6 +60,7 @@ namespace {
 
 constexpr const char* kTag = "menu";
 namespace hid = nxrt::hid;
+using nxrt::gfx::tr;
 using play::UiHost;
 
 const ImVec4 kOrange(1.0f, 0.66f, 0.26f, 1.0f);
@@ -223,7 +225,7 @@ void end_rows() { ImGui::EndTable(); }
 void section(const char* title) {
     ImGui::Spacing();
     ImGui::PushStyleColor(ImGuiCol_Text, kAccent);
-    ImGui::SeparatorText(title);
+    ImGui::SeparatorText(tr(title));
     ImGui::PopStyleColor();
 }
 
@@ -232,11 +234,11 @@ void row(Menu& m, const char* label, When when, const char* help) {
     ImGui::TableNextRow();
     ImGui::TableSetColumnIndex(0);
     ImGui::AlignTextToFramePadding();
-    ImGui::TextUnformatted(label);
+    ImGui::TextUnformatted(tr(label));
     if (when == When::Restart) {
         ImGui::SameLine();
-        ImGui::TextColored(kRestartTag, "restart");
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Applies on restart: the game reads this once, when it starts.");
+        ImGui::TextColored(kRestartTag, tr(tr("restart")));
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip(tr(tr("Applies on restart: the game reads this once, when it starts.")));
     }
     ImGui::TableSetColumnIndex(1);
     ImGui::SetNextItemWidth(-FLT_MIN);
@@ -251,24 +253,24 @@ void row(Menu& m, const char* label, When when, const char* help) {
 // Under a restart-only control: what runs until the restart.
 void pending_note(bool pending, const std::string& running) {
     if (!pending) return;
-    ImGui::TextColored(kOrange, "Applies on restart (running: %s)", running.empty() ? "default" : running.c_str());
+    ImGui::TextColored(kOrange, tr(tr("Applies on restart (running: %s)")), running.empty() ? tr("default") : running.c_str());
 }
 
 // A value row that is set by an environment variable: shown, locked.
 bool env_locked(const IniKey& k) {
     if (!ini_env(k)) return false;
-    ImGui::TextDisabled("%s (set by %s)", ini_now(k).c_str(), config_env_name(k.sec, k.key).c_str());
+    ImGui::TextDisabled(tr(tr("%s (set by %s)")), ini_now(k).c_str(), config_env_name(k.sec, k.key).c_str());
     return true;
 }
 
 // A list. *idx may be -1 (a value no entry holds): `other` is shown then. Left / right step through the entries.
-bool combo(Menu& m, const char* id, int* idx, const char* const* names, int n, const char* other = "Custom") {
+bool combo(Menu& m, const char* id, int* idx, const char* const* names, int n, const char* other = "Custom") {  // tr() at the sites
     bool changed = false;
-    const char* preview = *idx >= 0 && *idx < n ? names[*idx] : other;
+    const char* preview = *idx >= 0 && *idx < n ? tr(names[*idx]) : tr(other);
     if (ImGui::BeginCombo(id, preview, ImGuiComboFlags_HeightLarge)) {
         for (int i = 0; i < n; ++i) {
             const bool sel = i == *idx;
-            if (ImGui::Selectable(names[i], sel) && !sel) {
+            if (ImGui::Selectable(tr(names[i]), sel) && !sel) {
                 *idx = i;
                 changed = true;
             }
@@ -336,7 +338,7 @@ bool islider(Menu& m, const char* id, int* v, int lo, int hi, int step, const ch
 }
 
 bool button(Menu& m, const char* label) {
-    const bool b = ImGui::Button(label);
+    const bool b = ImGui::Button(tr(label));
     after_item(m);
     return b;
 }
@@ -425,7 +427,7 @@ void display_page(UiHost& host, Menu& m, const play::LiveStatus& live) {
         if (check(m, "##ka", &d.keep_aspect)) apply(host, m);
         end_rows();
     }
-    ImGui::TextDisabled("Now: %s, %d x %d, %.2f Hz display, present mode %s", live.window_mode, live.width, live.height,
+    ImGui::TextDisabled(tr("Now: %s, %d x %d, %.2f Hz display, present mode %s"), live.window_mode, live.width, live.height,
                         static_cast<double>(live.refresh_hz), live.present_mode);
 
     section("Scaling to the window");
@@ -470,7 +472,7 @@ void display_page(UiHost& host, Menu& m, const play::LiveStatus& live) {
         row(m, "Hotkey", When::Info, "[fps] key in controls.ini.");
         const std::string key = play::input_name(f.key);
         ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted(key.empty() ? "none" : key.c_str());
+        ImGui::TextUnformatted(key.empty() ? tr("none") : key.c_str());
         end_rows();
     }
 }
@@ -524,7 +526,7 @@ void output_size(const std::string& v, bool wide, int* w, int* h) {
 
 void resolution_group(Menu& m) {
     section("Resolution");
-    ImGui::TextWrapped("The game chooses its render configuration once, at start: these apply on restart (notes/resolution.md).");
+    ImGui::TextWrapped(tr("The game chooses its render configuration once, at start: these apply on restart (notes/resolution.md)."));
     if (begin_rows("res")) {
         // the output: the entries, or a WxH from the ini shown as it is
         const IniKey& out = *ini_key("fefw", "output");
@@ -557,7 +559,7 @@ void resolution_group(Menu& m) {
             row(m, "Fixed render size", When::Restart, "[fefw] render = WxH wins over the render scale. Clear it to use the scale.");
             if (!env_locked(fixed)) {
                 ImGui::AlignTextToFramePadding();
-                ImGui::TextUnformatted(ini_now(fixed).empty() ? "(cleared)" : ini_now(fixed).c_str());
+                ImGui::TextUnformatted(ini_now(fixed).empty() ? tr("(cleared)") : ini_now(fixed).c_str());
                 if (!ini_now(fixed).empty()) {
                     ImGui::SameLine();
                     if (button(m, "Clear##render")) ini_put(m, fixed, "");
@@ -582,13 +584,13 @@ void resolution_group(Menu& m) {
         int rh = ratio > 0 ? 2 * static_cast<int>(std::lround(oh * std::clamp(ratio, 0.25, 1.0) / 2)) : (oh + 1) / 2;
         const bool capped = !res_rt_pool_extended() && static_cast<int64_t>(ow) * oh > 2560 * 1440 && (rw > (ow + 1) / 2 || rh > (oh + 1) / 2);
         if (capped) rw = (ow + 1) / 2, rh = (oh + 1) / 2;
-        ImGui::TextDisabled("Next start: %d x %d rendered into %d x %d%s%s", rw, rh, ow, oh,
+        ImGui::TextDisabled(tr("Next start: %d x %d rendered into %d x %d%s%s"), rw, rh, ow, oh,
                             capped ? " (above 1440p the game's render-target pool holds half per side at most)" : "",
                             wide_next && wide_aspect(ow, oh) ? ", ultrawide" : "");
     }
     const WideInfo wi = wide_info();
     if (wi.active)
-        ImGui::TextDisabled("Ultrawide now: %d x %d, %.2fx a 16:9 picture's width; UI in the centred %d x %d", wi.out_w, wi.out_h,
+        ImGui::TextDisabled(tr("Ultrawide now: %d x %d, %.2fx a 16:9 picture's width; UI in the centred %d x %d"), wi.out_w, wi.out_h,
                             static_cast<double>(wi.k), static_cast<int>(std::lround(wi.out_h * 16.0 / 9.0)), wi.out_h);
 }
 
@@ -632,18 +634,18 @@ void upscaler_group(Menu& m) {
         end_rows();
     }
     const char* in_use = nvn::be::dlss_upscaler_in_use();
-    ImGui::TextDisabled("Running: %s; frame generation %s.", in_use ? in_use : "no DLSS call yet",
+    ImGui::TextDisabled(tr("Running: %s; frame generation %s."), in_use ? in_use : "no DLSS call yet",
                         extras::framegen_vsync_paused() ? "paused: vsync is on and the display is under twice the game's frame rate"
                         : extras::framegen_running()    ? "on"
                         : extras::framegen_requested()  ? "asked for, not running (see the log)"
                                                         : "off");
     // "found" only when every file the feature needs is there (the log names a missing one)
-    ImGui::TextDisabled("Files found: DLSS %s, DLSS-G %s, FSR 3 upscaling %s, FSR 3 frame generation %s.",
+    ImGui::TextDisabled(tr("Files found: DLSS %s, DLSS-G %s, FSR 3 upscaling %s, FSR 3 frame generation %s."),
                         extras::temporal_dlss_available() ? "yes" : "no", extras::streamline_framegen_files() ? "yes" : "no",
                         extras::temporal_ffx_available() ? "yes" : "no", extras::ffx_fg_files() ? "yes" : "no");
     if (extras::framegen_requested() && (m.edit.display.vsync || m.edit.extras.latency.mode != extras::LatencyMode::Off))
-        ImGui::TextColored(kOrange, "Frame generation works best with vsync and low latency off (Frame rate tab). With vsync on, the game renders at "
-                                    "most half the display's refresh rate.");
+        ImGui::TextColored(kOrange, "%s", tr("Frame generation works best with vsync and low latency off (Frame rate tab). With vsync on, the game "
+                                             "renders at most half the display's refresh rate."));
 }
 
 void hdr_group(UiHost& host, Menu& m) {
@@ -679,7 +681,7 @@ void hdr_group(UiHost& host, Menu& m) {
         end_rows();
     }
     const extras::HdrState hs = extras::hdr_state();
-    ImGui::TextDisabled("Now: HDR scene %s, swapchain %s, paper white %.0f, peak %.0f nits; the display reports HDR: %s", hs.scene_hdr ? "on" : "off",
+    ImGui::TextDisabled(tr("Now: HDR scene %s, swapchain %s, paper white %.0f, peak %.0f nits; the display reports HDR: %s"), hs.scene_hdr ? "on" : "off",
                         extras::output_kind_name(hs.output), static_cast<double>(hs.paper_white_nits), static_cast<double>(hs.peak_nits),
                         hs.display_hdr ? "yes" : "no");
 }
@@ -735,7 +737,7 @@ void fps_name(int v, char* buf, size_t n) {
 void framerate_page(UiHost& host, Menu& m, const play::LiveStatus& live, gfx::Overlay& ov) {
     const ClockInfo ck = clock_info();
     section("The game's frame rate");
-    ImGui::TextWrapped("The game steps its world by its own frame rate; the hooks that change it are installed at start.");
+    ImGui::TextWrapped(tr("The game steps its world by its own frame rate; the hooks that change it are installed at start."));
     if (begin_rows("game")) {
         const IniKey& k60 = *ini_key("fefw", "fps60");
         const IniKey& k120 = *ini_key("fefw", "fps120");
@@ -756,7 +758,7 @@ void framerate_page(UiHost& host, Menu& m, const play::LiveStatus& live, gfx::Ov
             const int running = ck.fps120 ? 2 : ck.fps60 ? 1 : 0;   // the hooks installed at start
             pending_note(idx != running, kNames[running]);
         } else {
-            ImGui::TextDisabled("set by the environment (%s / %s)", config_env_name("fefw", "fps60").c_str(), config_env_name("fefw", "fps120").c_str());
+            ImGui::TextDisabled(tr("set by the environment (%s / %s)"), config_env_name("fefw", "fps60").c_str(), config_env_name("fefw", "fps120").c_str());
         }
         constexpr const char* kSmooth[] = {"Auto (on at 60 and 120)", "On", "Off"};
         constexpr const char* kSmoothVals[] = {"auto", "1", "0"};
@@ -766,10 +768,10 @@ void framerate_page(UiHost& host, Menu& m, const play::LiveStatus& live, gfx::Ov
         end_rows();
     }
     if (ck.valid)
-        ImGui::TextDisabled("Game clock %.3fx real time over %d s (1.000 is right), target %d fps, display rate %d, step %.2f frames", ck.rate,
+        ImGui::TextDisabled(tr("Game clock %.3fx real time over %d s (1.000 is right), target %d fps, display rate %d, step %.2f frames"), ck.rate,
                             ck.window_s, ck.target, ck.display, static_cast<double>(ck.step));
     else
-        ImGui::TextDisabled("Game clock: not running yet (title or loading)");
+        ImGui::TextDisabled(tr("Game clock: not running yet (title or loading)"));
 
     play::DisplaySettings& d = m.edit.display;
     section("Presentation");
@@ -797,9 +799,9 @@ void framerate_page(UiHost& host, Menu& m, const play::LiveStatus& live, gfx::Ov
             const int want = ck.fps120 ? 120 : ck.fps60 ? 60 : 0;      // the gameplay rate the hooks installed at start run at
             const FrameLimiter* l = ov.context().limiter;
             if (want > 0 && d.fps_cap > 0 && d.fps_cap < want)
-                ImGui::TextColored(kOrange, "%d fps gameplay raises this limit to %d fps while it is on (the setting itself stays %d).", want, want, d.fps_cap);
+                ImGui::TextColored(kOrange, tr("%d fps gameplay raises this limit to %d fps while it is on (the setting itself stays %d)."), want, want, d.fps_cap);
             else if (want > 0 && l && l->target_fps() > 0 && l->target_fps() < want - 1)
-                ImGui::TextColored(kOrange, "%d fps gameplay is held to %.0f fps by %s: use a faster display, or turn vsync off and set a limit of %d or more.",
+                ImGui::TextColored(kOrange, tr("%d fps gameplay is held to %.0f fps by %s: use a faster display, or turn vsync off and set a limit of %d or more."),
                                    want, l->target_fps(), d.vsync ? "vsync and the display's refresh rate" : "the display's refresh rate (limit: Refresh rate)", want);
         }
         row(m, "Low latency", When::Restart, "NVIDIA Reflex or AMD Anti-Lag 2, whichever the GPU has. Keep it off with frame generation.");
@@ -812,7 +814,7 @@ void framerate_page(UiHost& host, Menu& m, const play::LiveStatus& live, gfx::Ov
         end_rows();
     }
     const FrameLimiter* lim = ov.context().limiter;
-    ImGui::TextDisabled("Now: %.1f fps presented; frame limit %.1f, pacing to %.1f fps (the lower of the limit and the game's rate); present mode %s",
+    ImGui::TextDisabled(tr("Now: %.1f fps presented; frame limit %.1f, pacing to %.1f fps (the lower of the limit and the game's rate); present mode %s"),
                         live.fps, lim ? lim->target_fps() : 0.0, lim ? lim->effective_fps() : 0.0, live.present_mode);
 }
 
@@ -888,7 +890,7 @@ constexpr KeyRowName kKeyRows[] = {
 
 void keyboard_section(Menu& m) {
     section("Keyboard");
-    ImGui::TextWrapped("The keys each Switch button or stick has. To change them, close the game and edit [bindings.all] in controls.ini.");
+    ImGui::TextWrapped(tr("The keys each Switch button or stick has. To change them, close the game and edit [bindings.all] in controls.ini."));
     if (!begin_rows("keys")) return;
     std::vector<std::pair<std::string, std::string>> rows;   // label, keys
     auto add = [&](const std::string& label, const std::string& key) {
@@ -919,7 +921,7 @@ void keyboard_section(Menu& m) {
     if (rows.empty()) {
         row(m, "No keys bound", When::Info, nullptr);
         ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted("[bindings.all] in controls.ini");
+        ImGui::TextUnformatted(tr("[bindings.all] in controls.ini"));
     }
     end_rows();
 }
@@ -991,12 +993,12 @@ void controls_page(UiHost& host, Menu& m, const play::LiveStatus& live) {
         if (slider(m, "##rums", &p.rumble_scale, 0.0, 2.0, 0.1, "%.1fx")) apply(host, m);
         end_rows();
     }
-    if (live.pads == 0) ImGui::TextDisabled("No controller connected.");
-    else ImGui::TextDisabled("%d connected: %s (rumble %s)", live.pads, live.pad_name.c_str(), live.pad_rumble ? "yes" : "no");
+    if (live.pads == 0) ImGui::TextDisabled("%s", tr("No controller connected."));
+    else ImGui::TextDisabled(tr("%d connected: %s (rumble %s)"), live.pads, live.pad_name.c_str(), live.pad_rumble ? "yes" : "no");
     mouse_section(host, m);
 
     section("Button mapping");
-    ImGui::TextWrapped("What each controller button presses on the Switch pad. Default keeps the layout above.");
+    ImGui::TextWrapped(tr("What each controller button presses on the Switch pad. Default keeps the layout above."));
     if (begin_rows("map")) {
         for (int i = 0; i < play::kPadSrcCount; ++i) {
             uint64_t& v = p.remap[i];
@@ -1019,7 +1021,7 @@ void controls_page(UiHost& host, Menu& m, const play::LiveStatus& live) {
     }
     keyboard_section(m);
     ImGui::Spacing();
-    ImGui::TextDisabled("This menu: F1, or Minus and Plus together on the pad. The game gets no input while it is open.");
+    ImGui::TextDisabled(tr("This menu: F1, or Minus and Plus together on the pad. The game gets no input while it is open."));
 }
 
 // ---- Game -------------------------------------------------------------------------------------------------------------------------------
@@ -1061,9 +1063,9 @@ void game_page(UiHost& host, Menu& m) {
         end_rows();
     }
     section("Files");
-    ImGui::TextDisabled("Game settings: %s", config_file_path().empty() ? "(none)" : config_file_path().c_str());
-    ImGui::TextDisabled("Controls and display: %s", host.settings_path().c_str());
-    ImGui::TextDisabled("Every key: runtime/docs/CONFIG.md");
+    ImGui::TextDisabled(tr("Game settings: %s"), config_file_path().empty() ? "(none)" : config_file_path().c_str());
+    ImGui::TextDisabled(tr("Controls and display: %s"), host.settings_path().c_str());
+    ImGui::TextDisabled(tr("Every key: runtime/docs/CONFIG.md"));
     section("About");
     play::draw_about_page(host.settings_path());
 }
@@ -1128,7 +1130,7 @@ void debug_page(UiHost& host, Menu& m, gfx::Overlay& ov) {
         std::snprintf(overlay, sizeof overlay, "avg %.2f ms (%.1f fps)  99%% %.1f ms  worst %.1f ms", avg, avg > 0 ? 1000.0 / avg : 0.0, p99, mx);
         const float top = std::max(34.f, std::ceil(mx / 8.33f) * 8.33f);
         ImGui::PlotLines("##ft", ft, static_cast<int>(n), 0, overlay, 0.f, top, ImVec2(-FLT_MIN, px(110)));
-        ImGui::TextDisabled("The last %d presented frames; the scale tops out at %.0f ms (16.7 ms = 60 fps, 33.3 ms = 30 fps).", static_cast<int>(n),
+        ImGui::TextDisabled(tr("The last %d presented frames; the scale tops out at %.0f ms (16.7 ms = 60 fps, 33.3 ms = 30 fps)."), static_cast<int>(n),
                             static_cast<double>(top));
     }
 
@@ -1148,25 +1150,25 @@ void debug_page(UiHost& host, Menu& m, gfx::Overlay& ov) {
             ImGui::TableSetColumnIndex(1);
             ImGui::Text("%.2f", m.phase_ms[p.phase]);
             ImGui::TableSetColumnIndex(2);
-            if (m.frame_ms_avg > 0) ImGui::Text("%.0f%%", 100.0 * m.phase_ms[p.phase] / m.frame_ms_avg);
+            if (m.frame_ms_avg > 0) ImGui::Text(tr("%.0f%%"), 100.0 * m.phase_ms[p.phase] / m.frame_ms_avg);
         }
         ImGui::EndTable();
     }
     if (r) {
         const gfx::RendererStats rs = r->stats();
-        ImGui::Text("Frame %.2f ms on average. GPU, the present pass (output, scaling, this menu): %.2f ms (avg %.2f).", m.frame_ms_avg,
+        ImGui::Text(tr("Frame %.2f ms on average. GPU, the present pass (output, scaling, this menu): %.2f ms (avg %.2f)."), m.frame_ms_avg,
                     static_cast<double>(rs.gpu_ms_last), static_cast<double>(rs.gpu_ms_avg));
         const VkExtent2D e = r->extent();
-        ImGui::TextDisabled("GPU %s; swapchain %u x %u, %u images, present mode %s; %llu frames, %llu swapchains", ov.context().device->gpu().name.c_str(),
+        ImGui::TextDisabled(tr("GPU %s; swapchain %u x %u, %u images, present mode %s; %llu frames, %llu swapchains"), ov.context().device->gpu().name.c_str(),
                             e.width, e.height, r->image_count(), gfx::present_mode_name(r->present_mode()),
                             static_cast<unsigned long long>(rs.frames), static_cast<unsigned long long>(rs.swapchain_creates));
     }
     if (const extras::LowLatency* ll = extras::lowlat(); ll && ll->stats().enabled) {
         const extras::LowLatency::Stats st = ll->stats();
-        ImGui::TextDisabled("%s: input to present %.2f ms, input to GPU end %.2f ms, sleep %.2f ms", ll->backend_name(), st.input_to_present_ms,
+        ImGui::TextDisabled(tr("%s: input to present %.2f ms, input to GPU end %.2f ms, sleep %.2f ms"), ll->backend_name(), st.input_to_present_ms,
                             st.input_to_gpu_ms, st.sleep_ms_avg);
     }
-    if (const int left = gfx::shader_backlog(); left > 0) ImGui::TextColored(kOrange, "Preparing shaders: %d left", left);
+    if (const int left = gfx::shader_backlog(); left > 0) ImGui::TextColored(kOrange, tr("Preparing shaders: %d left"), left);
     if (button(m, "Write the last 30 s of frame times to the log")) {
         NXLOG_I(kTag, "frame times (F1 menu):\n%s", frame_times_summary(30.0).c_str());
         notify(m, "Frame time summary written to the log.");
@@ -1175,20 +1177,20 @@ void debug_page(UiHost& host, Menu& m, gfx::Overlay& ov) {
     section("Game clock");
     const ClockInfo ck = clock_info();
     if (ck.valid)
-        ImGui::Text("%.3fx real time over %d s (1.000 is right); target %d fps, display rate %d, step %.2f frames", ck.rate, ck.window_s, ck.target,
+        ImGui::Text(tr("%.3fx real time over %d s (1.000 is right); target %d fps, display rate %d, step %.2f frames"), ck.rate, ck.window_s, ck.target,
                     ck.display, static_cast<double>(ck.step));
     else
-        ImGui::TextDisabled("Not running yet (title or loading).");
-    ImGui::TextDisabled("Hooks at start: fps60 %s, fps120 %s, smooth step %s", ck.fps60 ? "on" : "off", ck.fps120 ? "on" : "off", ck.smooth ? "on" : "off");
+        ImGui::TextDisabled(tr("Not running yet (title or loading)."));
+    ImGui::TextDisabled(tr("Hooks at start: fps60 %s, fps120 %s, smooth step %s"), ck.fps60 ? "on" : "off", ck.fps120 ? "on" : "off", ck.smooth ? "on" : "off");
 
     section("Ultrawide");
     const WideInfo wi = wide_info();
     if (!wi.active) {
-        ImGui::TextDisabled("Not installed: the output is 16:9 or narrower, or [fefw] ultrawide = off.");
+        ImGui::TextDisabled(tr("Not installed: the output is 16:9 or narrower, or [fefw] ultrawide = off."));
     } else {
-        ImGui::Text("Output %d x %d (%.4fx 16:9). Times each hook changed something:", wi.out_w, wi.out_h, static_cast<double>(wi.k));
+        ImGui::Text(tr("Output %d x %d (%.4fx 16:9). Times each hook changed something:"), wi.out_w, wi.out_h, static_cast<double>(wi.k));
         for (int n = 0; n < WideInfo::kCounters; ++n) {
-            ImGui::TextDisabled("%s %llu", wi.names[n] ? wi.names[n] : "?", static_cast<unsigned long long>(wi.counts[n]));
+            ImGui::TextDisabled(tr("%s %llu"), wi.names[n] ? wi.names[n] : "?", static_cast<unsigned long long>(wi.counts[n]));
             if (n % 5 != 4 && n + 1 < WideInfo::kCounters) ImGui::SameLine(0, 18);
         }
     }
@@ -1232,7 +1234,7 @@ void debug_page(UiHost& host, Menu& m, gfx::Overlay& ov) {
         pending_note(lt != m.boot.extras.latency.log_timings, m.boot.extras.latency.log_timings ? "on" : "off");
         end_rows();
     }
-    ImGui::TextDisabled("Log: %llu errors, %llu warnings so far", static_cast<unsigned long long>(log_count(LogLevel::Error)),
+    ImGui::TextDisabled(tr("Log: %llu errors, %llu warnings so far"), static_cast<unsigned long long>(log_count(LogLevel::Error)),
                         static_cast<unsigned long long>(log_count(LogLevel::Warn)));
 }
 
@@ -1256,6 +1258,8 @@ std::string pending_list(Menu& m) {
 
 // ---- the window -------------------------------------------------------------------------------------------------------------------------
 void settings_menu(play::UiHost& host, gfx::Overlay& ov) {
+    static bool i18n_once = [] { nxrt::gfx::menu_i18n_init(); return true; }();
+    (void)i18n_once;
     Menu& m = menu();
     if (!m.loaded) {
         m.boot = host.settings();
@@ -1298,12 +1302,12 @@ void settings_menu(play::UiHost& host, gfx::Overlay& ov) {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(px(18), px(14)));
     const ImGuiWindowFlags wf = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings;
     if (ImGui::Begin("##fefw_menu", nullptr, wf)) {
-        ImGui::TextColored(kAccent, "Fire Emblem: Fortune's Weave");
+        ImGui::TextColored(kAccent, tr("Fire Emblem: Fortune's Weave"));
         ImGui::SameLine();
-        ImGui::TextDisabled(" settings");
+        ImGui::TextDisabled(tr(" settings"));
         const char* hint = "L / R tabs   A select   B close";
         ImGui::SameLine(ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x - ImGui::CalcTextSize(hint).x);
-        ImGui::TextDisabled("%s", hint);
+        ImGui::TextDisabled("%s", tr(hint));
 
         m.help.clear();
         const float help_h = ImGui::GetTextLineHeightWithSpacing() * 2.2f;
@@ -1311,7 +1315,7 @@ void settings_menu(play::UiHost& host, gfx::Overlay& ov) {
         if (ImGui::BeginTabBar("##tabs", ImGuiTabBarFlags_NoTabListScrollingButtons | ImGuiTabBarFlags_FittingPolicyShrink)) {
             for (int t = 0; t < kTabCount; ++t) {
                 char label[48];
-                std::snprintf(label, sizeof label, "  %s  ###tab%d", kTabNames[t], t);
+                std::snprintf(label, sizeof label, "  %s  ###tab%d", tr(kTabNames[t]), t);
                 if (!ImGui::BeginTabItem(label, nullptr, m.tab_request == t ? ImGuiTabItemFlags_SetSelected : 0)) continue;
                 m.tab = t;
                 ImGui::BeginChild("##page", ImVec2(0, -bottom), ImGuiChildFlags_NavFlattened);
@@ -1336,8 +1340,8 @@ void settings_menu(play::UiHost& host, gfx::Overlay& ov) {
         // bottom: the row's description, the notice or what waits for a restart, Close
         ImGui::Separator();
         ImGui::PushTextWrapPos(0.f);
-        if (!m.help.empty()) ImGui::TextUnformatted(m.help.c_str());
-        else ImGui::TextDisabled("Changes apply at once and are saved. Rows marked restart apply when the game starts again.");
+        if (!m.help.empty()) ImGui::TextUnformatted(tr(m.help.c_str()));
+        else ImGui::TextDisabled(tr("Changes apply at once and are saved. Rows marked restart apply when the game starts again."));
         ImGui::PopTextWrapPos();
         ImGui::SetCursorPosY(ImGui::GetWindowHeight() - ImGui::GetStyle().WindowPadding.y - ImGui::GetFrameHeight());
         const std::string waits = pending_list(m);
@@ -1346,12 +1350,12 @@ void settings_menu(play::UiHost& host, gfx::Overlay& ov) {
             ImGui::TextColored(m.notice_err ? kRed : kGreen, "%s", m.notice.c_str());
         } else if (!waits.empty()) {
             ImGui::AlignTextToFramePadding();
-            ImGui::TextColored(kOrange, "Restart the game to apply: %s", waits.c_str());
+            ImGui::TextColored(kOrange, tr("Restart the game to apply: %s"), waits.c_str());
         } else {
             ImGui::AlignTextToFramePadding();
-            ImGui::TextDisabled("Saved to %s and %s", config_file_path().c_str(), host.settings_path().c_str());
+            ImGui::TextDisabled(tr("Saved to %s and %s"), config_file_path().c_str(), host.settings_path().c_str());
         }
-        const char* close = "Close";
+        const char* close = tr("Close");
         const float bw = ImGui::CalcTextSize(close).x + ImGui::GetStyle().FramePadding.x * 6;
         ImGui::SameLine(ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x - bw);
         if (ImGui::Button(close, ImVec2(bw, 0))) ov.request_hide();

@@ -27,6 +27,29 @@ std::string wide_to_utf8(const wchar_t* w) {
 
 }  // namespace
 
+std::wstring default_output_id() {
+    std::wstring out;
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    if (com != S_OK && com != S_FALSE && com != RPC_E_CHANGED_MODE) return out;
+    IMMDeviceEnumerator* en = nullptr;
+    if (SUCCEEDED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator),
+                                   reinterpret_cast<void**>(&en))) &&
+        en) {
+        IMMDevice* def = nullptr;
+        if (SUCCEEDED(en->GetDefaultAudioEndpoint(eRender, eConsole, &def)) && def) {
+            LPWSTR id = nullptr;
+            if (SUCCEEDED(def->GetId(&id)) && id) {
+                out = id;
+                CoTaskMemFree(id);
+            }
+            def->Release();
+        }
+        en->Release();
+    }
+    if (com == S_OK || com == S_FALSE) CoUninitialize();
+    return out;
+}
+
 std::vector<OutputDevice> list_output_devices() {
     std::vector<OutputDevice> out;
     // Balanced with CoUninitialize below. An existing COM mode on this thread (RPC_E_CHANGED_MODE) is kept.

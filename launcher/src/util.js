@@ -4,14 +4,14 @@ import {
   Play, Settings, FolderOpen, Info, CircleCheck, CircleX, TriangleAlert, CircleAlert, FileText,
   Save, Undo2, Folder, Monitor, Volume2, Mouse, Gamepad2, LoaderCircle, FolderSearch, Wrench,
   ShieldCheck, Keyboard, HardDrive, FileArchive, Terminal, ListChecks, Hammer, Circle, Sparkles, Gauge,
-  Download, RefreshCw, RotateCw, CircleArrowUp, Languages,
+  Download, RefreshCw, RotateCw, CircleArrowUp, Languages, Package,
 } from 'lucide';
 
 const ICONS = {
   Play, Settings, FolderOpen, Info, CircleCheck, CircleX, TriangleAlert, CircleAlert, FileText,
   Save, Undo2, Folder, Monitor, Volume2, Mouse, Gamepad2, LoaderCircle, FolderSearch, Wrench,
   ShieldCheck, Keyboard, HardDrive, FileArchive, Terminal, ListChecks, Hammer, Circle, Sparkles, Gauge,
-  Download, RefreshCw, RotateCw, CircleArrowUp, Languages,
+  Download, RefreshCw, RotateCw, CircleArrowUp, Languages, Package,
 };
 
 /** Calls a Rust command. */

@@ -99,6 +99,13 @@ State& st() {
 }
 std::atomic<int> g_api_error{0};
 std::atomic<uint64_t> g_sleep_ns{0};   // the last Reflex sleep (DLSS-G), for [nvn] frame_csv
+std::atomic<float> g_shown_ratio{0.0f};   // framegen_shown_ratio
+void set_shown_ratio(double game, double shown, uint32_t on) {
+    const bool mostly_on = game > 0 && on * 2 >= game;
+    g_shown_ratio.store(mostly_on ? static_cast<float>(shown / game) : 0.0f, std::memory_order_relaxed);
+}
+// Generation stopped for good (no more reports): the counter goes back to the game's own rate.
+void clear_shown_ratio() { g_shown_ratio.store(0.0f, std::memory_order_relaxed); }
 
 void on_api_error(const sl::APIError& e) { g_api_error.store(static_cast<int>(e.vkRes), std::memory_order_relaxed); }
 
@@ -276,6 +283,7 @@ void set_mode(State& s, bool on) {
         NXLOG_E(kTag, "slDLSSGSetOptions failed (%d): frame generation off", static_cast<int>(r));
         s.fg = false;
         s.on = false;
+        clear_shown_ratio();
         return;
     }
     if (on != s.on) NXLOG_I(kTag, "frame generation %s at frame %u", on ? "on" : "off", s.index);
@@ -302,6 +310,7 @@ void report(State& s) {
     }
     NXLOG_I(kTag, "%.1f game fps, %.1f shown fps, generation on %u of %u frames, status %u, last API error %d, Reflex sim start -> GPU end %.2f ms, GPU frame %.2f ms (%d frames)",
             s.n_game / sec, s.n_shown / sec, s.n_on, s.n_game, s.status, g_api_error.load(), n ? lat / n * 1e-3 : 0.0, n ? gpu / n * 1e-3 : 0.0, n);
+    set_shown_ratio(s.n_game, s.n_shown, s.n_on);
     if (s.n_extra_inputs || s.n_extra_sr)
         NXLOG_W(kTag, "%u frames had more than one DLSS evaluation (frame generation used the first one's inputs; DLSS SR moved to a new frame index %u times)",
                 s.n_extra_inputs, s.n_extra_sr);
@@ -539,7 +548,10 @@ void framegen_present_begin(VkCommandBuffer cb, VkExtent2D backbuffer, VkExtent2
 void framegen_present_end() {
     State& s = st();
     if (fg_setting() == 3) {
-        if (!ffx_fg_wanted()) return;
+        if (!ffx_fg_wanted()) {
+            clear_shown_ratio();
+            return;
+        }
         ++s.n_game;
         s.n_on += s.on ? 1 : 0;
         const uint64_t now = FrameLimiter::now_ns();
@@ -552,12 +564,17 @@ void framegen_present_end() {
             NXLOG_I(kTag, "FSR 3: %.1f game fps, %.1f shown fps (swapchain presents), generation on %u of %u frames%s", s.n_game / sec,
                     static_cast<double>(c - s.ffx_count0) / sec, s.n_on, s.n_game,
                     s.n_extra_inputs ? ", some frames had more than one DLSS evaluation" : "");
+            set_shown_ratio(s.n_game, static_cast<double>(c - s.ffx_count0), s.n_on);
             s.t0 = now;
             s.ffx_count0 = c;
             s.n_game = s.n_on = s.n_extra_inputs = 0;
         }
     } else {
-        if (!temporal_dlss_started() || !base_init()) return;
+        if (!temporal_dlss_started() || !base_init()) {
+            clear_shown_ratio();
+            return;
+        }
+        if (!s.fg) clear_shown_ratio();   // DLSS-G not running or stopped (slDLSSGSetOptions failed): no more reports
     }
     if (s.markers) marker(s, sl::PCLMarker::ePresentEnd);
     if (s.fg) {
@@ -616,6 +633,9 @@ void framegen_shutdown(void* gfx_device) {
     }
     for (auto& p : s.retired) s.dev->destroy_image(p.second);
     s = State();
+    clear_shown_ratio();
 }
+
+float framegen_shown_ratio() { return g_shown_ratio.load(std::memory_order_relaxed); }
 
 }  // namespace nxrt::extras

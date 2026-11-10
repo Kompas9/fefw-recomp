@@ -55,6 +55,9 @@ code, .mono { font-family: var(--font-mono); font-size: var(--font-size-sm); }
   font: inherit;
   font-weight: var(--font-weight-medium);
   cursor: pointer;
+  /* a translated label can be wider than the English one (or two characters wide in CJK): keep it on one line and let the
+     row give way instead (see `input` below), so a button never turns into a vertical stack of single characters */
+  white-space: nowrap;
   transition: background var(--transition), border-color var(--transition), opacity var(--transition);
 }
 .btn:hover:not(:disabled) { border-color: var(--color-accent); }

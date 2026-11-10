@@ -105,6 +105,12 @@ Put "$root\game-build\release\BUNDLED_TOOLS.txt" 'licenses\BUNDLED_TOOLS.txt'
 Put "$root\runtime\THIRD_PARTY_NOTICES.md" 'licenses\THIRD_PARTY_NOTICES.md'
 Put "$root\tools\shaders\licenses\LICENSE.Ryubing.MIT" 'licenses\LICENSE.Ryujinx.MIT.txt'
 
+# --- the language tables fefw_rt.dll reads (locales\<lang>.ini next to the DLL). The launcher copies them into the run folder
+# before the first start and does not replace one that is already there, so a player's own translation of a shipped language wins.
+$tables = Get-ChildItem "$root\locales" -Filter '*.ini' -File -ErrorAction SilentlyContinue
+if ($tables) { foreach ($t in $tables) { Put $t.FullName "locales\$($t.Name)" } }
+Put "$root\locales\README.md" 'locales\README.md'
+
 # --- the shader translator, self-contained (no .NET install needed on the player's PC)
 $harness = Join-Path $Out 'harness'
 # Always rebuild: reusing Out/harness can silently ship an older translator after

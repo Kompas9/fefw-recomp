@@ -28,6 +28,7 @@
 // buffers (2 by default, 0x1903ae0), then registers 4 and the third is missing: the site at 0x1906634 sets the count first. nxnative-penis6's
 // patches.py makes the same two changes in the code.
 #include "fefw_game.h"
+#include "play_types.h"
 
 #include <algorithm>
 #include <atomic>
