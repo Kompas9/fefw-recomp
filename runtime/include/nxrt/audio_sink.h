@@ -143,5 +143,7 @@ struct OutputDevice {
 };
 // The active render endpoints, in the system's order. Empty when there are none or enumeration fails. src/services/audio_devices.cpp.
 std::vector<OutputDevice> list_output_devices();
+// The id of the default render endpoint now; empty when there is none. src/services/audio_devices.cpp.
+std::wstring default_output_id();
 
 }  // namespace nxrt::audio
