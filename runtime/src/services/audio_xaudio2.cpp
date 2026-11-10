@@ -6,6 +6,8 @@
 // device already holds kMaxQueued buffers, or the pool is empty, write() drops the rest and reports how many frames it accepted, so
 // the caller never blocks. The voice callback also counts underruns (OnVoiceProcessingPassStart with nothing queued). The source
 // voice carries the process master volume ([audio] volume), re-applied whenever it changes.
+// XAudio2 stays on the endpoint it opened: when that endpoint goes away (headphones disconnect; the engine reports a critical error) or,
+// with [audio] device = default, the default endpoint becomes another one, write() opens the device again (checked once a second).
 #include <windows.h>
 #include <objbase.h>
 #include <mmreg.h>
@@ -115,6 +117,18 @@ private:
         }
     };
 
+    // The engine callback: OnCriticalError is how XAudio2 reports that the endpoint is gone (XAUDIO2_E_DEVICE_INVALIDATED and the like).
+    struct EngineCallback final : IXAudio2EngineCallback {
+        XAudio2Sink* owner = nullptr;
+        void STDMETHODCALLTYPE OnProcessingPassStart() noexcept override {}
+        void STDMETHODCALLTYPE OnProcessingPassEnd() noexcept override {}
+        void STDMETHODCALLTYPE OnCriticalError(HRESULT error) noexcept override {
+            if (!owner->lost_.exchange(true)) NXLOG_W("audio", "xaudio2: the output device was lost (0x%08lx)", static_cast<unsigned long>(error));
+        }
+    };
+
+    void close_device();     // close() without forgetting the format, so the device can be opened again
+    void follow_device();    // write thread, once a second: opens the device again when it was lost or the default endpoint moved
     void release_slot(uint32_t idx);
     void on_pass_start(UINT32 bytes_required) noexcept;
     void note_queued(uint32_t buffers) noexcept;
@@ -127,6 +141,12 @@ private:
     IXAudio2MasteringVoice* master_ = nullptr;
     IXAudio2SourceVoice* source_ = nullptr;
     Callback callback_;
+    EngineCallback engine_callback_;
+    std::atomic<bool> lost_{false};        // the engine reported a critical error since open()
+    uint32_t want_rate_ = 0, want_channels_ = 0;   // the format the caller opened (0: closed by the caller)
+    bool follow_default_ = false;          // opened on the default endpoint: follow it when it moves
+    std::wstring opened_default_id_;       // the default endpoint when the device was opened
+    ULONGLONG next_device_check_ms_ = 0;
     bool com_owned_ = false;          // this sink called CoInitializeEx successfully and must balance it
     DWORD com_thread_ = 0;            // the thread that did, so CoUninitialize runs there
     uint32_t channels_ = 0;
@@ -152,7 +172,7 @@ private:
 };
 
 bool XAudio2Sink::open(uint32_t sample_rate, uint32_t channels) {
-    close();
+    close_device();
     if (channels != 2 && channels != 6) {
         NXLOG_W("audio", "xaudio2: %u channels not supported (2 or 6)", channels);
         return false;
@@ -172,6 +192,9 @@ bool XAudio2Sink::open(uint32_t sample_rate, uint32_t channels) {
         return false;
     }
 
+    want_rate_ = sample_rate;
+    want_channels_ = channels;
+    lost_.store(false);
     HRESULT hr = XAudio2Create(&engine_, 0, XAUDIO2_DEFAULT_PROCESSOR);
     if (FAILED(hr)) {
         NXLOG_W("audio", "xaudio2: XAudio2Create failed (0x%08lx)", static_cast<unsigned long>(hr));
@@ -179,9 +202,15 @@ bool XAudio2Sink::open(uint32_t sample_rate, uint32_t channels) {
         return false;
     }
 
+    engine_callback_.owner = this;
+    engine_->RegisterForCallbacks(&engine_callback_);
     const std::vector<OutputDevice> devices = list_output_devices();
     log_devices(devices);
     const std::wstring device_id = pick_device(devices, config_get_str("audio", "device", "default"));
+    follow_default_ = device_id.empty();
+    opened_default_id_.clear();
+    for (const OutputDevice& d : devices)
+        if (d.is_default) opened_default_id_ = d.id;
     auto create_master = [this](const wchar_t* id) {
         return engine_->CreateMasteringVoice(&master_, XAUDIO2_DEFAULT_CHANNELS, XAUDIO2_DEFAULT_SAMPLERATE, 0, id, nullptr,
                                              AudioCategory_GameEffects);
@@ -249,6 +278,25 @@ bool XAudio2Sink::open(uint32_t sample_rate, uint32_t channels) {
 }
 
 void XAudio2Sink::close() {
+    want_rate_ = want_channels_ = 0;
+    close_device();
+}
+
+void XAudio2Sink::follow_device() {
+    if (!want_rate_) return;
+    const ULONGLONG now = GetTickCount64();
+    if (now < next_device_check_ms_) return;
+    next_device_check_ms_ = now + 1000;
+    const bool lost = lost_.load(std::memory_order_relaxed) || !source_;   // !source_: an earlier attempt found no device
+    if (!lost && !follow_default_) return;
+    const std::wstring def = default_output_id();
+    if (def.empty()) return;                                               // no output device at all: look again in a second
+    if (!lost && def == opened_default_id_) return;
+    NXLOG_I("audio", "xaudio2: %s: opening the output device again", lost ? "the output device was lost" : "the default output device changed");
+    open(want_rate_, want_channels_);
+}
+
+void XAudio2Sink::close_device() {
     if (!engine_ && !com_owned_) return;
     if (source_) {
         NXLOG_I("audio", "%s", format_stats(name(), stats()).c_str());
@@ -274,6 +322,7 @@ void XAudio2Sink::teardown() {
         master_ = nullptr;
     }
     if (engine_) {
+        engine_->UnregisterForCallbacks(&engine_callback_);
         engine_->Release();
         engine_ = nullptr;
     }
@@ -285,6 +334,7 @@ void XAudio2Sink::teardown() {
 }
 
 uint32_t XAudio2Sink::write(const int16_t* pcm, uint32_t frames) {
+    follow_device();
     const uint32_t accepted = (pcm && frames) ? submit(pcm, frames) : 0;
     frames_written_.fetch_add(frames, std::memory_order_relaxed);
     frames_accepted_.fetch_add(accepted, std::memory_order_relaxed);
