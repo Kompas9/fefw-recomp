@@ -446,10 +446,14 @@ void region_destroy(Region* r) {
     // Writable again first (faults on armed pages wait for the lock and then find the page writable), then out of the table.
     {
     ExclusiveLock lk(r);
+    // Every page this region protects: armed (read-only) or guarded (no access). A guarded page can have lost its armed bit (release_page
+    // on a page that guard() took again after the caller dropped its guard, as before_os_write does outside the lock): skipped here, it
+    // stayed no-access after the region was gone, with nobody to claim the fault when the memory was used again.
+    const auto held = [r](uint64_t i) { return test(r->prot.get(), i) || test(r->guard.get(), i); };
     for (uint64_t p = 0; p < r->npages;) {
-        if (!test(r->prot.get(), p)) { ++p; continue; }
+        if (!held(p)) { ++p; continue; }
         uint64_t q = p;
-        while (q < r->npages && test(r->prot.get(), q)) ++q;
+        while (q < r->npages && held(q)) ++q;
         set_bits(r->prot.get(), p, q - p, false);
         set_bits(r->guard.get(), p, q - p, false);
         DWORD was = 0;
