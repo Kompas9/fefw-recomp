@@ -28,6 +28,16 @@ English source string = Translated string
   an entry whose specifiers differ is dropped at load, stays English, and is
   listed in the log. `%%` is a literal `%` and needs no counterpart beyond the
   key's own `%%`.
+- A `*` width or precision reads an argument of its own, so it is part of the
+  comparison: `%*d` must stay `%*d` and may not become `%d`, and `%.*f` may not
+  become `%.2f`. Both sides are compared as a list of arguments
+  (`%*d` is `*` then `d`, `%ls` is `ls`), so moving an argument from the width
+  to the value, or reordering two conversions, is caught as well.
+- `%n` is refused outright: it writes through a pointer the caller never
+  passed, and no menu string uses one, so any entry that contains it is dropped
+  whatever the English key says.
+- A percent that is not a conversion is plain text and is left alone, which is
+  why prose such as `1% low` or `100% (native)` needs no escaping.
 
 ## Where the tables live
 
@@ -36,6 +46,37 @@ copies any `<name>.ini` it finds there into the run folder
 (`<game folder>/locales/`) before the first start and before every Play. A file
 that is already there is left alone, so a translation the player edited or
 added wins over the shipped one.
+
+## Keeping the shipped table up to date
+
+Because an existing file is never replaced, a new release cannot push fixes
+into `zh.ini` on its own. To pick up the translations from a newer build, copy
+the table out of the package over the one in the run folder:
+
+```
+<package>/locales/zh.ini   ->   <game folder>/locales/zh.ini
+```
+
+Delete the file instead if the player's own copy is the one to keep. Both the
+package copy and the run-folder copy are plain text, so a local edit can be
+merged by hand before it is dropped in. The same rule holds for a table the
+player wrote themselves: it lives in the run folder, and the launcher never
+touches it.
+
+## Two kinds of language packs
+
+The project has two independent language systems; they do not share files:
+
+| | In-game F1 menu | Launcher window |
+| --- | --- | --- |
+| File | `locales/<code>.ini` (next to `fefw_rt.dll`) | `locales/<code>.json` (next to `fefw-launcher.exe`) |
+| Format | `English string = translation` lines | JSON object with `code`, `name`, `strings` |
+| Selected by | `[gfx] ui_language` in `fefw.ini` | `lang` in `launcher.json` |
+| Shipped here | `zh.ini` | `template.json` (an empty starting point) |
+
+`zh.ini` and the launcher's JSON packs are separate features: this folder holds
+the in-game table, and the launcher's packs live in its own install folder. A
+translation of one does not translate the other.
 
 ## Font
 

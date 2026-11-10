@@ -44,15 +44,21 @@ std::string trim(const std::string& s) {
     return s.substr(a, b - a + 1);
 }
 
+// The conversions the menu actually writes: they all take exactly one argument. "%n" writes through a pointer it
+// was not given, so it is not in the list and a table that uses one is refused below.
 bool is_conversion(char c) { return c != '\0' && std::strchr("diouxXeEfFgGaAcsp", c) != nullptr; }
 
-// The printf conversions of a string, in order, each as "<length><conversion>" ("%d" gives "d", "%ls" gives "ls").
-// A translation is handed to ImGui::Text and friends as the format string, so its conversions have to match the
-// English key: one that drops a "%d" or turns it into "%s" makes the call read the wrong arguments.
+// The printf argument list of a string, in order, one token per argument that printf would read:
+//   "%d"   -> "d;"      "%ls" -> "ls;"      "%*d" -> "*;d;"      "%.*f" -> "*;f;"
+// A '*' width or precision takes an argument of its own, so it is recorded: a "%*d" and a "%d" read a different
+// number of arguments even though they share the conversion, and swapping one for the other is as fatal as
+// changing the conversion itself.
 // "%%" is a literal percent and takes no argument. A '%' that is not followed by a real conversion is taken as a
 // literal too: several display strings are plain prose with a percent in them ("1% low", a translated "50% off")
 // and never reach printf, so they must not be dropped for it.
-std::string conversions(const std::string& s) {
+// A conversion that is not in the list above (notably "%n") sets *unsafe and adds a token no other string can
+// produce, so the entry reads as a mismatch and is dropped.
+std::string conversions(const std::string& s, bool* unsafe = nullptr) {
     std::string out;
     for (size_t i = 0; i < s.size(); ++i) {
         if (s[i] != '%') continue;
@@ -61,25 +67,37 @@ std::string conversions(const std::string& s) {
         if (i >= s.size() || s[i] == '%') continue;
         const unsigned char next = static_cast<unsigned char>(s[i]);
         if (next >= 0x80 || next == ' ') continue;   // prose, not a conversion
+        std::string tok;   // kept aside until the conversion proves real, so a false start adds nothing
         size_t j = i;
         while (j < s.size() && s[j] != '\0' && std::strchr("-+#0", s[j]) != nullptr) ++j;
-        if (j < s.size() && s[j] == '*')
+        if (j < s.size() && s[j] == '*') {
+            tok += "*;";
             ++j;
-        else
+        } else {
             while (j < s.size() && s[j] >= '0' && s[j] <= '9') ++j;
+        }
         if (j < s.size() && s[j] == '.') {
             ++j;
-            if (j < s.size() && s[j] == '*')
+            if (j < s.size() && s[j] == '*') {
+                tok += "*;";
                 ++j;
-            else
+            } else {
                 while (j < s.size() && s[j] >= '0' && s[j] <= '9') ++j;
+            }
         }
         const size_t len = j;
         while (j < s.size() && s[j] != '\0' && std::strchr("hlLjzt", s[j]) != nullptr) ++j;
         if (j < s.size() && is_conversion(s[j])) {
-            out.append(s, len, j - len);
-            out.push_back(s[j]);
-            out.push_back(';');
+            tok.append(s, len, j - len);
+            tok.push_back(s[j]);
+            tok.push_back(';');
+            out += tok;
+            i = j;
+            continue;
+        }
+        if (j < s.size() && s[j] == 'n') {   // "%n", with or without a length ("%hn", "%ln"): writes to memory
+            if (unsafe) *unsafe = true;
+            out += "\x01";   // a byte no ASCII token above contains: never equal to a plain string's list
             i = j;
             continue;
         }
@@ -115,8 +133,17 @@ void load_file(const std::string& path) {
         std::string value = trim(t.substr(eq + skip));
         if (key.empty() || value.empty()) continue;
         // A translation is used as the printf format string, so its conversions have to match the English key.
-        // One that does not is dropped: the line stays English instead of reading the wrong arguments.
-        if (conversions(key) != conversions(value)) {
+        // One that does not is dropped: the line stays English instead of reading the wrong arguments. A "%n" in
+        // the value is dropped whatever the key says, because nothing the menu prints has one.
+        bool unsafe = false;
+        const std::string key_list = conversions(key);
+        const std::string value_list = conversions(value, &unsafe);
+        if (unsafe) {
+            ++dropped;
+            NXLOG_W(kTag, "dropping the translation of \"%s\": it uses %%n, which writes to memory", key.c_str());
+            continue;
+        }
+        if (key_list != value_list) {
             ++dropped;
             NXLOG_W(kTag, "dropping the translation of \"%s\": its format specifiers differ from the key",
                     key.c_str());
