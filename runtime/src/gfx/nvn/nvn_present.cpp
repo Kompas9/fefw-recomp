@@ -20,6 +20,7 @@
 #include "nxrt/ftrace.h"
 #include "nxrt/log.h"
 #include "nxrt/platform.h"
+#include "nxrt/render_status.h"
 #include "nvn_gpu_internal.h"
 
 namespace nxrt::nvn::be::gpu {
@@ -218,6 +219,7 @@ void present_on_render_thread(Window* w, int index, bool again) {
     gfx::Renderer::SubmitPrefix pre;
     const bool merged = take_batch_for_present(&cmds, &pre);
     extras::framegen_present_begin(fi.cmd, fi.extent, VkExtent2D{e.width, e.height}, crop, keep_aspect(), again);
+    render_status::set_screen(static_cast<int>(fi.extent.width), static_cast<int>(fi.extent.height));
     const uint64_t call_start = FrameLimiter::now_ns();
     { NXFT("present.end"); nxrt::HitchTimer ht(nxrt::kHpRenderPresentEnd); rend->end_frame(merged ? &pre : nullptr); }
     const uint64_t call_ns = FrameLimiter::now_ns() - call_start;
