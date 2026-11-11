@@ -14,6 +14,7 @@
 // The command line and the NXRT_FS_* variables win over the ini. [boot] keys as in pkp_main.cpp (docs/CONFIG.md).
 #include <windows.h>
 
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -40,7 +41,7 @@
 #include "nxrt/runtime.h"
 
 #include "fefw/fefw_game.h"   // the Fortune's Weave game module (runtime/games/fefw)
-#include "fefw_cpu.h"         // the CPU features the lifted code needs (FMA3, AVX, CX16), checked before any game code runs
+#include "fefw_cpu.h"         // the CPU features the lifted code needs (per build: FMA3 + AVX or SSE4.2 + POPCNT; CX16), checked first
 #include "fefw_paths.h"       // FEFW_EXEFS_DEFAULT, FEFW_MAIN_DEFAULT, FEFW_ROMFS_DEFAULT (game-build/fefw/CMakeLists.txt)
 
 // Two builds of this file (game-build/fefw/CMakeLists.txt):
@@ -201,16 +202,23 @@ std::string fs_path(const char* key, const std::string& cli, const char* def) {
 
 int fefw_run(int argc, char** argv);
 
-// Before the first lifted instruction: a CPU without FMA3 / AVX / CX16 would die on an illegal instruction in a blank window (issues 33, 5).
-// Says which feature is missing in a message box, on stderr and in fefw_fatal.txt (the launcher offers it), then ends with code 4.
-void check_cpu_or_exit() {
+// The processor features the build of the game code needs (FEFW_CPU_*), logged at start-up.
+uint32_t g_cpu_needs = FEFW_CPU_NEEDS_FMA_BUILD;
+
+// Before the first lifted instruction: a CPU without what this build of the game code needs (`needs`: FMA3 / AVX for the default build,
+// SSE4.2 / POPCNT for the compatible one, CX16 for both) would die on an illegal instruction in a blank window (issues 33, 5). Says which
+// feature is missing in a message box, on stderr and in fefw_fatal.txt (the launcher offers it), then ends with code 4.
+void check_cpu_or_exit(uint32_t needs) {
+    g_cpu_needs = needs;
     const fefw_cpu::Report r = fefw_cpu::probe();
-    if (r.ok()) return;
-    const std::string msg = fefw_cpu::message(r);
+    if (!r.missing(needs)) return;
+    const std::string msg = fefw_cpu::message(r, needs);
     std::fprintf(stderr, "fefw: %s\n", msg.c_str());
     if (FILE* f = std::fopen("fefw_fatal.txt", "w")) {
-        std::fprintf(f, "fefw cannot start on this processor.\n\n%s\n\nCPU features: FMA3 %s, AVX %s, CMPXCHG16B %s\n", msg.c_str(), r.fma ? "yes" : "NO",
-                     r.avx ? "yes" : "NO", r.cx16 ? "yes" : "NO");
+        auto yes = [&](uint32_t bit) { return (r.have & bit) ? "yes" : "NO"; };
+        std::fprintf(f, "fefw cannot start on this processor.\n\n%s\n\nfefw.exe build: %s\nCPU features: FMA3 %s, AVX %s, SSE4.2 %s, POPCNT %s, CMPXCHG16B %s\n",
+                     msg.c_str(), fefw_cpu::build_name(needs), yes(FEFW_CPU_FMA), yes(FEFW_CPU_AVX), yes(FEFW_CPU_SSE42), yes(FEFW_CPU_POPCNT),
+                     yes(FEFW_CPU_CX16));
         std::fclose(f);
     }
     MessageBoxA(nullptr, msg.c_str(), "fefw: this processor is too old", MB_OK | MB_ICONERROR);
@@ -222,8 +230,10 @@ void check_cpu_or_exit() {
 
 #ifdef FEFW_RT_DLL
 extern "C" int fefw_rt_main(int argc, char** argv, const FefwRtModules* m) {
-    check_cpu_or_exit();
-    if (!m || m->size < sizeof(FefwRtModules) || m->api != FEFW_RT_API) {
+    // the build's processor features; a stub from before cpu_needs (0.1.6 and older) was always the FMA3 build
+    const bool has_needs = m && m->size >= offsetof(FefwRtModules, cpu_needs) + sizeof(uint32_t);
+    check_cpu_or_exit(has_needs ? m->cpu_needs : FEFW_CPU_NEEDS_FMA_BUILD);
+    if (!m || m->size < offsetof(FefwRtModules, cpu_needs) || m->api != FEFW_RT_API) {
         MessageBoxA(nullptr, "fefw.exe and fefw_rt.dll are from different releases: run Set up again in the launcher.", "fefw", MB_OK | MB_ICONERROR);
         return 3;
     }
@@ -237,7 +247,7 @@ extern "C" int fefw_rt_main(int argc, char** argv, const FefwRtModules* m) {
 }
 #else
 int main(int argc, char** argv) {
-    check_cpu_or_exit();
+    check_cpu_or_exit(FEFW_CPU_NEEDS_FMA_BUILD);     // the libraries of recomp/games/fefw are compiled with -mfma
     const NxModule* nx[6] = {&nxmod_rtld, &nxmod_main, &nxmod_subsdk0, &nxmod_subsdk1, &nxmod_subsdk2, &nxmod_sdk};
     const uint32_t* abi[6] = {&nxmod_rtld_abi, &nxmod_main_abi, &nxmod_subsdk0_abi, &nxmod_subsdk1_abi, &nxmod_subsdk2_abi, &nxmod_sdk_abi};
     for (int i = 0; i < 6; i++) {
@@ -280,6 +290,7 @@ int fefw_run(int argc, char** argv) {
     const std::string main_nso = fs_path("main", main_arg, FEFW_MAIN_DEFAULT);
     const std::string romfs = fs_path("romfs", romfs_arg, FEFW_ROMFS_DEFAULT);
     nxrt::config_set("process", "program_id", "0x04007EF01F8AE000");     // GetInfo(ProgramId); an ini value or the environment still wins
+    NXLOG_I("boot", "fefw.exe build: %s", fefw_cpu::build_name(g_cpu_needs));
     NXLOG_I("boot", "%s (update %s): exefs '%s', main '%s', romfs '%s'", nxrt::game::info().title, nxrt::game::info().version, exefs.c_str(),
             main_nso.c_str(), romfs.c_str());
     if (!dir_exists(romfs)) NXLOG_W("boot", "RomFS folder '%s' not found: set [fs] romfs", romfs.c_str());

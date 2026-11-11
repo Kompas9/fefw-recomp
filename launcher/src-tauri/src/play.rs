@@ -289,10 +289,16 @@ pub fn start(app: &AppHandle, exe: &Path, game_dir: &Path, launcher_dir: &Path, 
         let files = report_files(&dir, started);
         let crash_file = files.iter().any(|f| f.fresh && f.name != "fefw.log");
         let crashed = crash_file || code.map_or(true, |c| c != 0);
+        // Code 4 is both the CPU check's exit and the crash handler's: only a fresh fefw_fatal.txt means the processor (#82).
+        let cpu_fatal = files.iter().any(|f| f.fresh && f.name == "fefw_fatal.txt");
         let message = match (&wait_err, code) {
             (Some(e), _) => format!("Lost track of fefw.exe: {e}"),
             (None, Some(0)) => "fefw.exe exited normally.".to_string(),
-            (None, Some(4)) => "fefw.exe stopped before the game started: this processor lacks FMA3, AVX or CMPXCHG16B, which the game needs (an Intel Haswell or AMD Piledriver, 2012-2013, or newer). fefw_fatal.txt says which.".to_string(),
+            (None, Some(4)) if cpu_fatal => match crate::cpu::build_variant() {
+                // fefw.exe was built for another processor (the folder moved, the processor changed): Set up builds the one for this
+                Some(_) => "fefw.exe stopped before the game started: it was built for a processor with features this one lacks (fefw_fatal.txt says which). Run Set up again: it builds the version of the game for this processor.".to_string(),
+                None => "fefw.exe stopped before the game started: this processor lacks CMPXCHG16B, SSE4.2 or POPCNT, which the game needs (an Intel Core i3 / i5 / i7 of 2008 or an AMD FX of 2011, or newer). fefw_fatal.txt says which.".to_string(),
+            },
             (None, Some(c)) => format!("fefw.exe exited with code {} (0x{:08X}).", c, c as u32),
             (None, None) => "fefw.exe was ended by the system.".to_string(),
         };

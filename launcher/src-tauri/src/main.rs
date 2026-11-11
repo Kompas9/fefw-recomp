@@ -352,8 +352,10 @@ struct SetupStatus {
     jobs: usize,
     /// running from the release package (no build tools needed)
     package: bool,
-    /// why this PC's processor cannot run the compiled game (missing FMA3 / AVX / CMPXCHG16B), if it cannot
+    /// why this PC's processor cannot run the compiled game (missing CMPXCHG16B / SSE4.2 / POPCNT), if it cannot
     cpu_problem: Option<String>,
+    /// set when this processor gets the compatible build of the game code (no FMA3: cpu.rs)
+    cpu_note: Option<String>,
 }
 
 #[tauri::command]
@@ -372,6 +374,7 @@ fn setup_status(app: AppHandle, state: State<Arc<setup::Shared>>) -> SetupStatus
         tools: setup::check_tools(package_tools().is_some()),
         package: package_tools().is_some(),
         cpu_problem: cpu::check(),
+        cpu_note: cpu::note(),
         log: state.log.lock().unwrap().iter().cloned().collect(),
         jobs: jobs_of(&cfg),
     }

@@ -23,7 +23,7 @@ software and draws with Vulkan. It is not an emulator.
 ## Requirements
 
 - Windows 10 or 11, 64-bit
-- A CPU with FMA3 and AVX: an Intel Haswell (2013) or newer, or an AMD Piledriver (2012) / Ryzen or newer (Ivy Bridge and Xeon E5 v2, Sandy Bridge and older are not supported; Setup and `fefw.exe` say so instead of crashing)
+- A 64-bit CPU with SSE4.2 and POPCNT: an Intel Core i3 / i5 / i7 (2008) or newer, or an AMD FX (2011) / Ryzen or newer. Setup builds the game for your processor: CPUs with FMA3 (Intel Haswell 2013, AMD Piledriver 2012 and newer) get the faster build, older ones such as Sandy Bridge, Ivy Bridge and Xeon E5 v1 / v2 a compatible build that plays the same, a little slower. Older processors (Core 2, AMD Phenom) are not supported; Setup and `fefw.exe` say so instead of crashing
 - A GPU with Vulkan 1.3 and an up-to-date driver
 - 16 GB of RAM and about 30 GB of free disk space
 - Your own decrypted dump of the game at update **131072**, in one of these forms:

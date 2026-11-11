@@ -1,8 +1,12 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """First-run game build of the release package: turns the player's own dump into fefw.exe on their PC.
 
-    python -I tools/build/fefw_build.py --exefs <dump>/updates/<v>/exefs --game <install folder> [--jobs N] [--keep]
-    python -I tools/build/fefw_build.py --check --game <install folder>
+    python -I tools/build/fefw_build.py --exefs <dump>/updates/<v>/exefs --game <install folder> [--jobs N] [--keep] [--cpu V]
+    python -I tools/build/fefw_build.py --check --game <install folder> [--cpu V]
+
+--cpu picks the build for the processor (CPU_VARIANTS): fma (FMA3 + AVX, the default and faster one) or compat (no FMA3: Sandy
+Bridge, Ivy Bridge, Xeon E5 v1/v2, AMD Bulldozer, ...; issue 33). auto (the default; the launcher passes the one it detected) asks the
+bundled Zig what this processor has. The variant is part of the build stamp, so a fefw.exe built for the other one is rebuilt.
 
 The package ships no game code. This script
   1. verifies the dump's ExeFS against dump_hashes.json (the supported build: sha256 of every module + main's build ID) and writes
@@ -13,7 +17,7 @@ The package ships no game code. This script
   5. deletes the generated sources and objects (unless --keep) and records the result in <game>/build/done.json.
 
 The build stamp (state.json, done.json) is the dump (main build ID, module hashes) plus tool_stamp(): everything in this
-package that goes into fefw.exe (lifter sources, main.sites, compile flags, the SDK files with fefw_rt.lib). A release that
+package that goes into fefw.exe (lifter sources, main.sites, compile flags and processor variant, the SDK files with fefw_rt.lib). A release that
 changes any of them makes an older stamp stale: Set up then lifts, compiles and links again from scratch (the old fefw.exe
 stays until the new one is linked over it). --check compares <game>/build/done.json with this package's tools only (no
 dump check, well under a second) and prints one JSON line {"current": bool, "reason": text}; exit 0 current, 3 not.
@@ -27,6 +31,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -46,7 +51,7 @@ FORMAT = 2          # bump when the build layout or the stamp changes: older bui
 LIFTER = ['nxrecomp', 'include/nxrecomp', 'games/fefw/CMakeLists.txt', 'games/fefw/config.py']
 SITES = 'games/fefw/main.sites'
 # what the link takes from sdk/ besides the lifted objects and fefw_rt.lib (stamped on its own, as 'runtime')
-SDK_FILES = ['fefw_stub.cpp', 'fefw_rt_api.h', 'fefw.rc', 'fefw.manifest', 'fefw.ico']
+SDK_FILES = ['fefw_stub.cpp', 'fefw_rt_api.h', 'fefw_fma.c', 'fefw.rc', 'fefw.manifest', 'fefw.ico']
 
 # name, NSO file, guest base, NxModule.index, translation units (as recomp/games/fefw/CMakeLists.txt)
 MODULES = [
@@ -58,10 +63,30 @@ MODULES = [
     ('rtld', 'rtld', 0x7700000000, 5, 1),
 ]
 EXEFS_FILES = ['main', 'sdk', 'subsdk0', 'subsdk1', 'subsdk2', 'rtld', 'main.npdm']
-# recomp/cmake/NxRecomp.cmake flags for the lifted code, in clang (not clang-cl) syntax
-# plus recomp/games/fefw/CMakeLists.txt's -mfma and NX_INLINE_INDIRECT
-CXXFLAGS = ['-target', 'x86_64-windows-gnu', '-mcpu=x86_64+cx16+fma', '-std=c++20', '-O1', '-w', '-fno-exceptions', '-fno-rtti',
-            '-fno-strict-aliasing', '-ffp-contract=off', '-fno-math-errno', '-fno-threadsafe-statics', '-DNX_INLINE_INDIRECT']
+# The builds of the game code, one per kind of processor. What the lifted code needs: CMPXCHG16B (the guest's 128-bit exclusive
+# pairs, ctx.h) and nothing else beyond x86-64; everything more is speed. fefw_rt.dll is baseline x86-64 (its AVX2 / FMA3 code: the
+# BC7 encoder, the UCRT's math, picked by CPUID at run time), so the processor this needs is the game code's.
+#   fma     FMA3 (with AVX, which it implies in LLVM): the guest's FMADD / FMLA family is one vfmadd. Intel Haswell (2013), AMD
+#           Piledriver (2012) and newer.
+#   compat  no FMA3: std::fma / fmaf are calls into sdk/fefw_fma.c (musl's, correctly rounded: the same bits as vfmadd; the fma
+#           Zig links otherwise is not exact), so slower in float-heavy code. SSE4.2 and POPCNT keep rounding (FRINT*) and CNT
+#           inline. Intel Nehalem (2008) and newer, AMD Bulldozer (2011) and newer: Sandy / Ivy Bridge, Xeon E5 v1 / v2 (issue 33).
+# 'needs' is what fefw_rt.dll checks before the first game instruction (fefw_rt_api.h FEFW_CPU_*, the stub passes it on);
+# launcher/src-tauri/src/cpu.rs picks the variant by the same rule (variant_for).
+CPU_VARIANTS = {
+    'fma': {'mcpu': 'x86_64+cx16+fma', 'needs': 'FEFW_CPU_NEEDS_FMA_BUILD', 'features': ('cx16', 'sse4_2', 'avx', 'fma'), 'link': []},
+    'compat': {'mcpu': 'x86_64+cx16+sse4_2+popcnt', 'needs': 'FEFW_CPU_NEEDS_COMPAT_BUILD', 'features': ('cx16', 'sse4_2', 'popcnt'),
+               'link': ['fefw_fma.c']},
+}
+# recomp/cmake/NxRecomp.cmake flags for the lifted code, in clang (not clang-cl) syntax, plus NX_INLINE_INDIRECT
+# (recomp/games/fefw/CMakeLists.txt); -mcpu per variant. -ffp-contract=off: no multiply and add is fused that the guest kept apart.
+CXXFLAGS_COMMON = ['-std=c++20', '-O1', '-w', '-fno-exceptions', '-fno-rtti', '-fno-strict-aliasing', '-ffp-contract=off', '-fno-math-errno',
+                   '-fno-threadsafe-statics', '-DNX_INLINE_INDIRECT']
+
+
+def cxxflags(variant):
+    """The compile flags of the lifted code for a CPU_VARIANTS key ('fma': the flags every release before 0.1.7 used)."""
+    return ['-target', 'x86_64-windows-gnu', '-mcpu=' + CPU_VARIANTS[variant]['mcpu']] + CXXFLAGS_COMMON
 CREATE_NO_WINDOW = 0x08000000
 BELOW_NORMAL = 0x00004000
 
@@ -113,17 +138,64 @@ def tree_hash(root, rels):
 
 
 # The launcher's SHADER_TRANSLATOR_VERSION (launcher/src-tauri/src/setup.rs): keep the two equal.
-SHADER_TRANSLATOR_VERSION = 2
+SHADER_TRANSLATOR_VERSION = 3
 
 
-def tool_stamp():
-    """The part of the build stamp this package decides: a release that changes any of it rebuilds fefw.exe."""
+def tool_stamp(variant):
+    """The part of the build stamp this package decides: a release that changes any of it rebuilds fefw.exe. The processor
+    variant is in it as well, so a fefw.exe built for the other one is rebuilt (the lift is kept: see main)."""
     return {'lifter': tree_hash(RECOMP, LIFTER), 'sites': tree_hash(RECOMP, [SITES]), 'sdk': tree_hash(SDK, SDK_FILES),
-            'runtime': sha256(os.path.join(SDK, 'fefw_rt.lib')), 'cxxflags': CXXFLAGS, 'modules': [list(m) for m in MODULES]}
+            'runtime': sha256(os.path.join(SDK, 'fefw_rt.lib')), 'cxxflags': cxxflags(variant), 'cpu': variant,
+            'modules': [list(m) for m in MODULES]}
 
 
-def check(game):
-    """Whether fefw.exe and <game>/build/done.json were built with this package's tools: (current, reason)."""
+# FEFW_CPU_FORCE_MISSING names (as fefw_rt.dll and the launcher read them) -> Zig's feature names
+FORCE_NAMES = {'fma': ('fma',), 'avx': ('avx', 'fma'), 'cx16': ('cx16',), 'sse42': ('sse4_2',), 'sse4.2': ('sse4_2',), 'popcnt': ('popcnt',)}
+
+
+def host_features():
+    """This processor's features as the bundled Zig detects them (`zig targets`: .native .cpu .features), or None when that
+    cannot be read. Zig leaves AVX and FMA out when the operating system does not save the YMM registers, as the check in
+    fefw_rt.dll does. FEFW_CPU_FORCE_MISSING (a test hook, as for the launcher and fefw_rt.dll) hides features."""
+    try:
+        out = subprocess.run([ZIG, 'targets'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+                             creationflags=CREATE_NO_WINDOW, timeout=120).stdout.decode('utf-8', 'replace')
+    except (OSError, subprocess.SubprocessError):
+        return None
+    i = out.find('.native')
+    j = out.find('.features', i) if i >= 0 else -1
+    if j < 0:
+        return None
+    feats = set(re.findall(r'"([^"]+)"', out[j:out.find('}', j)]))
+    if not feats:
+        return None
+    for name in os.environ.get('FEFW_CPU_FORCE_MISSING', '').split(','):
+        feats.difference_update(FORCE_NAMES.get(name.strip().lower(), ()))
+    return feats
+
+
+def pick_variant(want):
+    """--cpu (fma / compat / auto) -> (variant, None), or (None, why) when this processor runs neither. auto: FEFW_BUILD_CPU when
+    set to a variant, else the fastest one this processor runs; fma when the processor cannot be read."""
+    if want in (None, '', 'auto'):
+        want = os.environ.get('FEFW_BUILD_CPU', '').strip().lower() or 'auto'
+    if want in CPU_VARIANTS:
+        return want, None
+    if want != 'auto':
+        return None, 'unknown --cpu %s (fma, compat or auto)' % want
+    feats = host_features()
+    if feats is None:
+        return 'fma', None
+    for v in ('fma', 'compat'):
+        if all(f in feats for f in CPU_VARIANTS[v]['features']):
+            return v, None
+    missing = [f for f in CPU_VARIANTS['compat']['features'] if f not in feats]
+    return None, ("This PC's processor does not support %s, which the game needs (an Intel Core i3 / i5 / i7 of 2008 or newer, or "
+                  "an AMD FX of 2011 or newer)." % ', '.join(f.replace('cx16', 'CMPXCHG16B').replace('sse4_2', 'SSE4.2').upper() for f in missing))
+
+
+def check(game, variant):
+    """Whether fefw.exe and <game>/build/done.json were built with this package's tools for this processor: (current, reason)."""
     if not os.path.isfile(os.path.join(game, 'fefw.exe')):
         return False, 'fefw.exe is not built yet'
     done = read_json(os.path.join(game, 'build', 'done.json'))
@@ -131,8 +203,11 @@ def check(game):
         return False, 'fefw.exe has no finished build record'
     if done.get('format') != FORMAT or not isinstance(done.get('tools'), dict):
         return False, 'fefw.exe was built by an older release'
-    want = tool_stamp()
+    want = tool_stamp(variant)
     changed = [k for k in want if done['tools'].get(k) != want[k]]
+    if 'cpu' in changed and done['tools'].get('cpu') in CPU_VARIANTS:
+        return False, ('fefw.exe was built for processors with FMA3; this one needs the compatible build' if variant == 'compat'
+                       else 'fefw.exe is the compatible build; this processor runs the faster FMA3 build')
     if changed:
         return False, 'this release changes ' + ', '.join(changed)
     shaders = read_json(os.path.join(game, 'shader_cache', 'setup.json'))
@@ -307,7 +382,7 @@ def free_memory():
         return None
 
 
-def compile_all(runner, gen, obj, jobs, env):
+def compile_all(runner, gen, obj, jobs, env, variant):
     units = []
     for name, _, _, _, shards in MODULES:
         d = os.path.join(gen, name)
@@ -330,11 +405,14 @@ def compile_all(runner, gen, obj, jobs, env):
     def one(t):
         name, src, o = t
         tmp = o + '.tmp'
-        cmd = [ZIG, 'c++'] + CXXFLAGS + ['-I', os.path.join(RECOMP, 'include'), '-I', os.path.dirname(src), '-c', src, '-o', tmp]
+        cmd = [ZIG, 'c++'] + cxxflags(variant) + ['-I', os.path.join(RECOMP, 'include'), '-I', os.path.dirname(src), '-c', src, '-o', tmp]
         rc, tail = runner.run(cmd, env=env)
         if rc != 0:
             return 'Compiling %s/%s failed (exit %d):\n%s' % (name, os.path.basename(src), rc, tail)
-        os.replace(tmp, o)
+        try:
+            replace_retry(tmp, o)
+        except OSError as e:     # a failed unit, retried one at a time below, not an abort of the whole build
+            return 'Compiling %s/%s: %s' % (name, os.path.basename(src), e)
         return None
 
     # a big unit takes a GB or two in clang; with too many at once memory runs out and clang dies on every unit with
@@ -368,6 +446,20 @@ def compile_all(runner, gen, obj, jobs, env):
         progress('compile', done, total, 'Compiling: %d of %d' % (done, total))
 
 
+def replace_retry(src, dst):
+    """os.replace, retried for a few seconds: an antivirus scanning a freshly written file holds it open (PermissionError)."""
+    delay = 0.1
+    while True:
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if delay > 3.2:
+                raise
+            time.sleep(delay)
+            delay *= 2
+
+
 def clear_high_entropy_va(exe):
     """fefw.exe keeps host allocations low (the guest ranges at 0x71_0000_0000 must stay free): no high-entropy ASLR,
     as /HIGHENTROPYVA:NO does for the clang-cl build. zig's linker has no flag for it, so clear the PE bit."""
@@ -384,7 +476,7 @@ def clear_high_entropy_va(exe):
         f.write(dc.to_bytes(2, 'little'))
 
 
-def link(runner, obj, game, env):
+def link(runner, obj, game, env, variant):
     progress('link', 0, 1, 'Linking fefw.exe')
     libs = []
     for name, _, _, _, _ in MODULES:
@@ -401,16 +493,25 @@ def link(runner, obj, game, env):
         if rc != 0:
             raise Fail('Archiving %s failed (exit %d):\n%s' % (name, rc, tail))
         libs.append(a)
+    # the variant's own sources (compat: sdk/fefw_fma.c), as C and ahead of the libraries, so their fma / fmaf are the ones linked
+    extra = []
+    for src in CPU_VARIANTS[variant]['link']:
+        o = os.path.join(obj, os.path.splitext(src)[0] + '.o')
+        rc, tail = runner.run([ZIG, 'cc', '-target', 'x86_64-windows-gnu', '-mcpu=' + CPU_VARIANTS[variant]['mcpu'], '-O1', '-ffp-contract=off',
+                               '-fno-math-errno', '-c', os.path.join(SDK, src), '-o', o], env=env)
+        if rc != 0:
+            raise Fail('Compiling %s failed (exit %d):\n%s' % (src, rc, tail))
+        extra.append(o)
     tmp = os.path.join(obj, 'fefw.exe')
+    # FEFW_CPU_NEEDS: what fefw_rt.dll checks the processor for before the game starts (fefw_rt_api.h)
     cmd = [ZIG, 'c++', '-target', 'x86_64-windows-gnu', '-mcpu=x86_64+cx16', '-O1', '-fno-exceptions', '-fno-rtti', '-I', SDK,
-           os.path.join(SDK, 'fefw_stub.cpp'), os.path.join(SDK, 'fefw.rc')] + libs + [os.path.join(SDK, 'fefw_rt.lib'),
-           '-o', tmp, '-Wl,--stack,134217728', '-Wl,--subsystem,windows']
+           '-DFEFW_CPU_NEEDS=' + CPU_VARIANTS[variant]['needs'], os.path.join(SDK, 'fefw_stub.cpp'), os.path.join(SDK, 'fefw.rc')] +         extra + libs + [os.path.join(SDK, 'fefw_rt.lib'), '-o', tmp, '-Wl,--stack,134217728', '-Wl,--subsystem,windows']
     rc, tail = runner.run(cmd, env=env, cwd=SDK)
     if rc != 0:
         raise Fail('Linking fefw.exe failed (exit %d):\n%s' % (rc, tail))
     clear_high_entropy_va(tmp)
     dst = os.path.join(game, 'fefw.exe')
-    os.replace(tmp, dst)
+    replace_retry(tmp, dst)
     progress('link', 1, 1, 'fefw.exe built')
     return dst
 
@@ -422,6 +523,7 @@ def main():
     ap.add_argument('--jobs', type=int, default=max(1, (os.cpu_count() or 2) - 1))
     ap.add_argument('--keep', action='store_true', help='keep the generated sources and objects')
     ap.add_argument('--check', action='store_true', help='only say whether <game>/build/done.json matches these tools')
+    ap.add_argument('--cpu', default='auto', help='the build for the processor: fma, compat or auto (CPU_VARIANTS)')
     ap.add_argument('--lift-one', help=argparse.SUPPRESS)
     a = ap.parse_args()
     if a.lift_one:                       # child process: one lifter run (keeps the lifter's own pool out of this process)
@@ -431,8 +533,9 @@ def main():
     if a.check:
         if not a.game:
             ap.error('--check needs --game')
+        variant, why = pick_variant(a.cpu)
         try:
-            current, reason = check(os.path.abspath(a.game))
+            current, reason = check(os.path.abspath(a.game), variant) if variant else (False, why)
         except OSError as e:                 # a tool file that cannot be read: Set up then runs and names it
             current, reason = False, 'cannot read the build tools: %s' % e
         print(json.dumps({'current': current, 'reason': reason}), flush=True)
@@ -455,10 +558,15 @@ def main():
     try:
         if not os.path.isfile(ZIG):
             raise Fail('The bundled compiler is missing (%s). Extract the release zip again.' % ZIG)
+        variant, why = pick_variant(a.cpu)
+        if not variant:
+            raise Fail(why)
+        if variant == 'compat':
+            progress('verify', 0, 1, 'Building the compatible version of the game (for processors without FMA3)')
         want = verify(a.exefs)
         plain = os.path.join(game, 'exefs')
         write_exefs(a.exefs, plain)
-        stamp = {'format': FORMAT, 'main_build_id': want['main_build_id'], 'sha256': want['sha256'], 'tools': tool_stamp()}
+        stamp = {'format': FORMAT, 'main_build_id': want['main_build_id'], 'sha256': want['sha256'], 'tools': tool_stamp(variant)}
         state_p = os.path.join(build, 'state.json')
         # another dump or another release (or no readable state): start over. Removing lift/ drops the modules' .lifted
         # markers too, so a changed lifter or main.sites lifts everything again, not only recompiles
@@ -476,10 +584,10 @@ def main():
         lift(runner, plain, gen, a.jobs)
         times['lift'] = round(time.time() - t, 1)
         t = time.time()
-        compile_all(runner, gen, obj, a.jobs, env)
+        compile_all(runner, gen, obj, a.jobs, env, variant)
         times['compile'] = round(time.time() - t, 1)
         t = time.time()
-        exe = link(runner, obj, game, env)
+        exe = link(runner, obj, game, env, variant)
         times['link'] = round(time.time() - t, 1)
         if not a.keep:
             progress('finish', 0, 1, 'Removing the build files')
