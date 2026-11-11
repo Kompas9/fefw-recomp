@@ -283,6 +283,14 @@ export const en = {
     'settings.faceButtons.hint': 'How the four face buttons are mapped. By label, the button printed A is the Switch A, as on an Xbox pad. By position, the bottom button is the Switch B, as on a Switch pad. The button icons follow the layout.',
     'settings.faceButtons.label_': 'By label (Xbox A = Switch A)',
     'settings.faceButtons.position': 'By position (bottom = Switch B)',
+  'settings.haptic.label': 'Vibration',
+  'settings.haptic.hint': 'How the HD Rumble value from the game reaches the pad. Automatic: DualSense haptics over a USB cable, HD Rumble packets for a Switch Pro Controller, the standard rumble for anything else. The game reads this when it starts, so a change takes effect on the next run.',
+  'settings.haptic.auto': 'Automatic',
+  'settings.haptic.off': 'Off',
+  'settings.haptic.rumble': 'Standard rumble',
+  'settings.haptic.dualsense': 'DualSense haptics',
+  'settings.hapticStrength.label': 'Vibration strength',
+  'settings.hapticStrength.hint': '0 to 100 percent for the haptic backends. -1 keeps using the rumble strength in the in-game menu, which is what an untouched controls.ini uses.',
 
     // input, saves and log
     'settings.jc2Mouse.label': "Mouse controls (the game's Joy-Con 2 mouse)",

@@ -17,6 +17,7 @@
 
 #include "nxrt/config.h"
 #include "nxrt/game.h"
+#include "nxrt/haptic.h"
 
 namespace nxrt::play {
 namespace {
@@ -343,6 +344,16 @@ bool apply_fixed(Sec sec, const std::string& k, const std::string& v, Settings* 
             if (k == "gyro_scale") return set_num(&s->pad.gyro_scale);
             if (k == "rumble") return set_bool(&s->pad.rumble);
             if (k == "rumble_scale") return set_num(&s->pad.rumble_scale);
+            if (k == "haptic") {
+                gfx::haptic::Mode m = gfx::haptic::Mode::Auto;
+                if (!gfx::haptic::mode_from_name(v.c_str(), &m)) {
+                    *msg = "haptic must be auto, off, rumble or dualsense, got '" + v + "'";
+                    return false;
+                }
+                s->pad.haptic = static_cast<int>(m);
+                return true;
+            }
+            if (k == "haptic_strength") return set_int(-1, 100, &s->pad.haptic_strength);
             if (k == key_alt_orbit()) return set_real(0.0, 6.0, &s->pad.alt_orbit);
             break;
         case Sec::Timing:
@@ -888,6 +899,8 @@ std::string format_settings(const Settings& s) {
     kv("gyro_scale", num(s.pad.gyro_scale));
     kv("rumble", flag(s.pad.rumble));
     kv("rumble_scale", num(s.pad.rumble_scale));
+    kv("haptic", gfx::haptic::mode_name(static_cast<gfx::haptic::Mode>(s.pad.haptic)));
+    kv("haptic_strength", std::to_string(s.pad.haptic_strength));
     kv(key_alt_orbit(), num(s.pad.alt_orbit));
 
     o += "\n[padmap]\n";

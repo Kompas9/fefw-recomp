@@ -1,0 +1,97 @@
+RenHDrum
+Copyright (c) 2026 Three-Dola
+
+This product includes software developed by Three-Dola (https://github.com/trzz1214/RenHDrum).
+
+The RenHDrum core library (src/, include/, tests/, examples/, and docs/) is dual-licensed
+under either:
+  * MIT License (LICENSE-MIT or http://opensource.org/licenses/MIT)
+  * Apache License, Version 2.0 (LICENSE-APACHE or http://www.apache.org/licenses/LICENSE-2.0)
+at your option.
+
+--------------------------------------------------------------------------------
+Attributions & Third-Party Credits
+--------------------------------------------------------------------------------
+
+1. Ryujinx & Ryubing
+   Parts of the HD Rumble DSP logic, packet structures, and state transitions
+   originated from Ryujinx and the Ryuhdr project (with contributions from GreemDev).
+   Copyright (c) Ryujinx Team and Contributors.
+   Licensed under the MIT License.
+
+2. dekuNukem (Nintendo_Switch_Reverse_Engineering)
+   HD Rumble frequency encoding formulas, 101-entry non-linear amplitude lookup
+   table, neutral stop packet, and Subcommand 0x10 protocol documentation
+   (rumble_data_table.md and bluetooth_hid_notes.md).
+   https://github.com/dekuNukem/Nintendo_Switch_Reverse_Engineering
+
+3. Switchbrew Wiki Contributors
+   Reverse engineering documentation of Nintendo Switch HidMotorData,
+   VibrationAmFmPackTag 4-byte bit-packing layouts, and AmFmCodes unpacking tables.
+   https://switchbrew.org/wiki/Joy-Con
+
+4. felipearmat (OGX-Mini-2026 PR #116)
+   5-bit logarithmic amplitude decoder scale -0.5 * (code - 1) with -0.84375 offset
+   relative to 7-bit peak in HdRumble.cpp and HdRumble.h, and Steam UI tick packet analysis
+   (repo MegaCadeDev/OGX-Mini-2026, fork of wiredopposite/OGX-Mini).
+   Referenced only; no code copied.
+   https://github.com/MegaCadeDev/OGX-Mini-2026/pull/116
+
+5. rei-github, ClearlyClaire (dekuNukem Issue #11) & CTCaer (jc_toolkit)
+   Oscilloscope exponential amplitude decay measurements, alternative bit-layouts,
+   and hardware packet captures.
+   https://github.com/dekuNukem/Nintendo_Switch_Reverse_Engineering/issues/11
+   https://github.com/CTCaer/jc_toolkit
+
+6. Nielk1 & DualSense Reverse-Engineering Community
+   DualSense 10-zone Adaptive Trigger bit-packing, Linux hid-playstation, and
+   4-channel 48 kHz USB Audio Class VCM routing.
+   https://gist.github.com/Nielk1/6d54cc2c00d2201ccb8c2720ad7538db
+
+7. Simple DirectMedia Layer (SDL)
+   Patches in integrations/sdl3/sdl3-patches/ are derived from SDL (libsdl-org/SDL,
+   with contributions from Valve Corporation and SDL Contributors).
+   Copyright (C) 1997-2025 Sam Lantinga <slouken@libsdl.org>.
+   Licensed under the zlib License (see integrations/sdl3/sdl3-patches/LICENSE).
+
+8. Brontide Reference Integration Patches
+   Patches in integrations/brontide/ apply to Eden / Yuzu emulation codebases.
+   Copyright (c) 2026 Three-Dola and the Eden / Yuzu Contributors.
+   Licensed under the GNU General Public License, version 3 or later (GPL-3.0-or-later)
+   (see integrations/brontide/LICENSE).
+
+9. egormanga (SAxense)
+   DualSense Bluetooth haptics report 0x32 layout documentation (packet 0x11 + 0x12,
+   s8 3 kHz PCM, CRC seed 0xA2).
+   Format reference only; no code copied.
+   Licensed under Mozilla Public License 2.0 (MPL-2.0).
+   https://github.com/egormanga/SAxense
+   https://apps.sdore.me/SAxense
+
+10. Franseven (PokeDinner)
+    Author of PokeDinner 2.5.0 (commit 216b5034c6, tag 2.5.0), the baseline
+    Switch 2 emulator testbed used for Brontide-NS2.
+    Licensed under the GNU General Public License, version 3 or later (GPL-3.0-or-later).
+
+11. neo Luigi (Eglantine PR #155)
+    Original implementation of nn::hid::IHidServer command 214
+    (SendVibrationValuesInMode) dispatching (commits 2b413a46a2 and 465aa33077).
+    Licensed under the GNU General Public License, version 3 or later (GPL-3.0-or-later).
+
+12. samaBR85 (renhdrum-eden)
+    Patch adaptations porting RenHDrum into Eglantine and Lichii, independent Switch 2
+    in-game trace verification, and SDL Raw Input deadlock resolution.
+    Licensed under the GNU General Public License, version 3 or later (GPL-3.0-or-later).
+    https://github.com/samaBR85/renhdrum-eden
+
+13. Frizti, zortos293, Dark (Fritchii v5.3 / Lichii / Dynamic FPS)
+    Authors of Fritchii v5.3 (commit 1a7a3c03c5), Lichii, and Dynamic FPS, providing
+    the baseline Switch 2 emulator platform used for Brontide-oot.
+    Licensed under the GNU General Public License, version 3 or later (GPL-3.0-or-later).
+
+14. NotRexed & Hookshot Contributors (Hookshot)
+    Authors of Hookshot (OoT Switch 2 Recompiler, commit fa43939, tag v2.0.6),
+    providing the reference static recompilation testbed for integrations/recomp-c/
+    (see integrations/recomp-c/reference/).
+    Licensed under the GNU General Public License, version 3 (GPL-3.0).
+    https://github.com/NotRexed/Hookshot

@@ -268,6 +268,14 @@ export const zh = {
     'settings.faceButtons.hint': '四个面键怎么映射。按印字：印着 A 的那个键就是 Switch 的 A，和 Xbox 手柄一致。按位置：底部那个键是 Switch 的 B，和 Switch 手柄一致。按键图标会跟着布局一起变。',
     'settings.faceButtons.label_': '按印字（Xbox 的 A = Switch 的 A）',
     'settings.faceButtons.position': '按位置（底部 = Switch 的 B）',
+  'settings.haptic.label': '震动模式',
+  'settings.haptic.hint': '游戏的高清震动值怎么送到手柄上。自动：有线 USB 的 DualSense 用触觉反馈，Switch Pro 手柄用 HD Rumble 数据包，其它手柄用普通震动。游戏启动时读取这一项，改完下次运行生效。',
+  'settings.haptic.auto': '自动',
+  'settings.haptic.off': '关闭',
+  'settings.haptic.rumble': '普通震动',
+  'settings.haptic.dualsense': 'DualSense 触觉反馈',
+  'settings.hapticStrength.label': '震动强度',
+  'settings.hapticStrength.hint': '0 到 100 的百分比，只作用于触觉后端。-1 表示沿用游戏内菜单里的震动强度，也就是没改过的 controls.ini 的状态。',
 
     // 输入、存档与日志
     'settings.jc2Mouse.label': '用 PC 鼠标模拟 Joy-Con 2 鼠标',

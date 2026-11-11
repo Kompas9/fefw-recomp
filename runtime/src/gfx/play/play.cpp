@@ -42,6 +42,7 @@
 #include "nxrt/hooks.h"
 #include "nxrt/input.h"
 #include "nxrt/services_api.h"
+#include "nxrt/haptic.h"
 #include "nxrt/input_source.h"
 #include "nxrt/log.h"
 #include "nxrt/nvn_backend.h"
@@ -83,6 +84,7 @@ namespace {
 
 constexpr const char* kTag = "play";
 constexpr uint64_t kMs = 1000000ull;
+namespace haptic = nxrt::gfx::haptic;
 
 // SDL mouse button (1 left, 2 middle, 3 right, 4 X1, 5 X2) to nn::hid::MouseButton (Left 0, Right 1, Middle 2, Forward 3, Back 4).
 uint32_t jc2_button_bit(uint8_t b) {
@@ -450,6 +452,8 @@ void vib_sink(uint32_t slot, int hand, const hid::VibrationValue& v, void*) {
     G& st = g();
     st.vib[hand][0].store(v.amp_low);
     st.vib[hand][1].store(v.amp_high);
+    // The haptic backends need the frequencies too: the standard rumble below keeps only the amplitudes.
+    haptic::push(slot, hand, v.amp_low, v.freq_low, v.amp_high, v.freq_high);
 }
 
 }  // namespace
@@ -708,7 +712,8 @@ void poll_pads(uint64_t now) {
                 have_six = true;
             }
         }
-        if (rumble_changed || rumble_refresh) platform::gamepad_rumble(infos[i].id, lo, hi, 250);
+        // The haptic backends drive the pad themselves; only the plain two-motor path goes through SDL here.
+        if ((rumble_changed || rumble_refresh) && haptic::legacy_rumble()) platform::gamepad_rumble(infos[i].id, lo, hi, 250);
     }
     if (rumble_changed || rumble_refresh) {
         st.rumble_lo = lo;
@@ -803,6 +808,7 @@ int update_hook(::Ctx*, uint64_t, void*) {
             apply_fps_counter(s.fps);
             st.want_present.store(static_cast<int>(present_mode_for(s.display)));
             apply_audio(s.audio);
+            haptic::configure(static_cast<haptic::Mode>(s.pad.haptic), s.pad.haptic_strength, s.pad.rumble_scale, s.pad.rumble);
             if (st.window && s.display.monitor != old_monitor && s.display.monitor > 0) {
                 if (platform::move_to_display(s.display.monitor)) st.limiter.reset_schedule();
                 apply_frame_cap(s);                        // another display can mean another refresh rate
@@ -1348,6 +1354,7 @@ bool start(const StartOptions& opt) {
     st.source = std::shared_ptr<hid::InputSource>(st.source_owner.get(), [](hid::InputSource*) {});   // owned by G
     hid::set_input_source(st.source);
     hid::set_vibration_sink(&vib_sink, nullptr);
+    haptic::configure(static_cast<haptic::Mode>(st.settings.pad.haptic), st.settings.pad.haptic_strength, st.settings.pad.rumble_scale, st.settings.pad.rumble);
     tt::set_mouse_sink(&test_mouse_sink);
     tt::set_key_sink(&key_sink);
     if (st.renderer) tt::set_screenshot_provider(&screenshot_provider, nullptr);
@@ -1429,6 +1436,7 @@ void stop() {
     if (st.hook_update) hook_remove(st.hook_update);
     st.hook_update = 0;
     hid::set_vibration_sink(nullptr, nullptr);
+    haptic::shutdown();
     if (hid::input_source() == st.source) hid::set_input_source(nullptr);
     if (st.dirty) {
         std::string err;
