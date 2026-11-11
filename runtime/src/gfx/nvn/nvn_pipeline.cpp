@@ -17,6 +17,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "nxrt/config.h"
 #include "nxrt/ftrace.h"
@@ -911,6 +912,7 @@ struct PoolRes {
     std::vector<Texture*> by_id;                // the texture at each id (compared only; reg holds the references)
     std::unordered_map<Texture*, std::pair<Ref<Texture>, uint32_t>> reg;   // registered textures, the number of ids each sits at
     std::vector<Ref<Texture>> watch;            // to look at next time
+    std::unordered_set<Texture*> watching;     // membership only; watch owns the references
     uint64_t epoch = 0;                         // g_tex_scan_epoch when every texture was last looked at
     bool all = true;                            // look at every texture next time
     uint64_t last_use = 0;
@@ -1322,13 +1324,18 @@ void pool_texture_remade(Texture* t) {
     }
 }
 
+static void watch_texture(PoolRes& pool, const Ref<Texture>& texture) {
+    // Retain one owning reference per pending texture, even if its layout changed repeatedly.
+    if (pool.watching.insert(texture.get()).second) pool.watch.push_back(texture);
+}
+
 void pool_textures_to_prepare(TexturePool* tp, std::vector<Texture*>& out) {
     if (!tp) return;
     PoolRes& r = pool_res(tp);
     r.last_use = current_serial();
     for (const Ref<Texture>& t : g_layout_moves)        // moved since the last call: the pools they are registered in look at them
         for (auto& pr : g_pool_res)
-            if (pr->reg.count(t.get())) pr->watch.push_back(t);
+            if (pr->reg.count(t.get())) watch_texture(*pr, t);
     g_layout_moves.clear();
     {
         std::shared_lock<std::shared_mutex> lk(tp->lock);
@@ -1347,7 +1354,7 @@ void pool_textures_to_prepare(TexturePool* tp, std::vector<Texture*>& out) {
                 if (now) {
                     auto& slot = r.reg[now];
                     if (!slot.second++) slot.first = Ref<Texture>::share(now);
-                    if (partial) r.watch.push_back(slot.first);
+                    if (partial) watch_texture(r, slot.first);
                 }
                 was = now;
             };
@@ -1384,7 +1391,9 @@ void pool_textures_to_prepare(TexturePool* tp, std::vector<Texture*>& out) {
     }
     // not ready now (the replay leaves an attachment of the open pass as it is): looked at again next time
     r.watch.clear();
-    for (size_t i = first; i < out.size(); ++i) r.watch.push_back(Ref<Texture>::share(out[i]));
+    r.watching.clear();
+    for (size_t i = first; i < out.size(); ++i) watch_texture(r, Ref<Texture>::share(out[i]));
+
 }
 
 bool pool_state_moved(TexturePool* tp, SamplerPool* sp) {
