@@ -349,6 +349,7 @@ export const zh = {
   'settings.textureDetail.hint': '「一半」把游戏的大贴图按一半尺寸存放，与主机内存容量相当。若游戏在都城等大区域变慢或卡住，就选它；8 GB 显存的显卡想要更清晰的贴图可选「完整」，代价是占用更多显存。下次启动生效。',
   'settings.textureDetail.label': '贴图精度',
   'setup.cpuProblem': '此处理器无法运行该游戏。',
+  'setup.cpuCompat': '将为此处理器构建兼容版本。',
   'setup.tool.visualStudio': 'Visual Studio C++ 工具',
   'setup.tool.visualStudio.hint': 'Visual Studio 2022 Build Tools 或更新版本，需勾选 C++ 工具集。',
   'setup.tool.llvm': 'LLVM（clang-cl）',

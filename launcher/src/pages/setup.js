@@ -165,6 +165,7 @@ export async function render(el, ctx) {
         </div>
 
         ${status.cpu_problem ? `<div class="banner danger" id="cpu-problem">${icon('circle-x')}<div><strong>${esc(t('setup.cpuProblem'))}</strong> ${esc(status.cpu_problem)}</div></div>` : ''}
+        ${!status.cpu_problem && status.cpu_note ? `<div class="banner info" id="cpu-note">${icon('info')}<div><strong>${esc(t('setup.cpuCompat'))}</strong> ${esc(status.cpu_note)}</div></div>` : ''}
 
         ${status.package ? '' : toolsHtml(status.tools)}
         ${ok && saved === path ? stepsHtml(status) : ''}

@@ -222,7 +222,7 @@ impl Run<'_> {
         let _ = fs::remove_file(&zip);
         let _ = fs::remove_file(&part);
         let mut child = curl()
-            .args(["--retry", "3", "--output"])
+            .args(["--retry", "3", "--speed-limit", "1024", "--speed-time", "60", "--output"])  // a stalled connection fails after a minute instead of hanging
             .arg(&part)
             .arg(&rel.asset_url)
             .stdin(Stdio::null())

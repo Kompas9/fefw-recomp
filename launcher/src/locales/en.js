@@ -112,6 +112,7 @@ export const en = {
     'setup.pauseHint': 'Pause stops the tools; finished work is kept and Set up continues from there.',
     'setup.pause': 'Pause',
     'setup.cpuProblem': "This processor cannot run the game.",
+    'setup.cpuCompat': 'Compatible build for this processor.',
     'setup.goToPlay': 'Go to Play',
     'setup.openFullLog': 'Open full log',
     'setup.step.python': 'Python environment',
