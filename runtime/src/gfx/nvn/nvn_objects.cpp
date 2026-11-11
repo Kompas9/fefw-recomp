@@ -46,7 +46,27 @@ struct PoolGauges {
     ~PoolGauges() { nxrt::gauge_unregister("nvn.pool_registry"); }
 };
 PoolGauges g_pool_gauges;
+// Host objects the game has finalized that are still alive (something on the host side still holds a reference: a pool pair, a texture
+// pool entry, a command list, a sparse texture). They should come back down to a handful a few seconds after a scene change; one that
+// only grows is a host object outliving its guest object (issue #81).
+nxrt::GaugeCounter g_pools_finalized_alive("nvn.memory_pools.finalized_alive");
+nxrt::GaugeCounter g_pools_finalized_alive_bytes("nvn.memory_pools.finalized_alive.bytes");
+nxrt::GaugeCounter g_textures_finalized_alive("nvn.textures.finalized_alive");
 }  // namespace
+
+void lifetime_pool_retired(const MemoryPool* p) {
+    g_pools_finalized_alive.add(1);
+    g_pools_finalized_alive_bytes.add(static_cast<int64_t>(p->size));
+}
+void lifetime_pool_freed(const MemoryPool* p) {
+    if (!p->dead.load()) return;
+    g_pools_finalized_alive.sub(1);
+    g_pools_finalized_alive_bytes.sub(static_cast<int64_t>(p->size));
+}
+void lifetime_texture_finalized() { g_textures_finalized_alive.add(1); }
+void lifetime_texture_freed(const Texture* t) {
+    if (t->destroyed.load()) g_textures_finalized_alive.sub(1);
+}
 
 void pool_register(MemoryPool* p) {
     std::unique_lock<std::shared_mutex> lk(g_pool_mu);

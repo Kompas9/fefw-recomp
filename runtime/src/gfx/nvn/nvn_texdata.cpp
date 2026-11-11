@@ -236,19 +236,15 @@ bool cache_read(const std::string& path, uint64_t key, PreparedTexture& out) {
 // ---- level geometry --------------------------------------------------------------------------------------------------------
 // One level of the tight linear buffer (the untiled image, or the pitch-linear copy).
 // One BC7 block of a single colour: mode 6, both endpoints the colour (7 bits + a 0 p-bit, so within 1/255), every index 0.
+// Bits 0-6 the mode, then R0 R1 G0 G1 B0 B1 A0 A1 at 7 bits each (bits 7-62), all in the low half. Built with shifts: a stand-in fills
+// tens of thousands of these per texture on the render thread, and a bit-by-bit loop made that most of a cold-cache load (0.1.7 hub load).
 void bc7_solid_block(const uint8_t* rgba, uint8_t* out) {
-    uint64_t lo = 0, hi = 0;
-    unsigned pos = 0;
-    auto put = [&](uint64_t v, unsigned n) {
-        for (unsigned b = 0; b < n; ++b, ++pos)
-            if ((v >> b) & 1) (pos < 64 ? lo : hi) |= uint64_t{1} << (pos & 63);
-    };
-    put(1u << 6, 7);   // mode 6
+    uint64_t lo = uint64_t{1} << 6;   // mode 6
     for (int c = 0; c < 4; ++c) {
-        put(rgba[c] >> 1, 7);
-        put(rgba[c] >> 1, 7);
+        const uint64_t v = rgba[c] >> 1;
+        lo |= (v << (7 + 14 * c)) | (v << (14 + 14 * c));
     }
-    // p-bits 0, indices 0: the rest of the block stays zero
+    const uint64_t hi = 0;   // p-bits 0, indices 0
     std::memcpy(out, &lo, 8);
     std::memcpy(out + 8, &hi, 8);
 }
@@ -828,7 +824,9 @@ bool prepare_texture(const Texture& t, const TexCaps& caps, PreparedTexture& out
     // solid BC7 blocks taken from a small level (decoded once per layer) instead of being encoded, so it costs about 1 ms, not 50-150.
     size_t solid_src = geo.size();
     if (provisional && geo[0].d == 1 && geo.size() > 1) {
-        static const uint32_t solid_max = static_cast<uint32_t>(std::max<int64_t>(16, config_get_int("nvn", "standin_full_px", 256)));
+        // [nvn] standin_full_px: levels up to this size are encoded (preset 0), the bigger ones are solid blocks taken from the first of them. 256 cost
+        // 5-10 s of render thread per Dagsion load (580 stand-ins at 10-40 ms, mostly the 256 level's encode); 64 costs 0.5 s.
+        static const uint32_t solid_max = static_cast<uint32_t>(std::max<int64_t>(16, config_get_int("nvn", "standin_full_px", 64)));
         for (size_t i = 0; i < geo.size(); ++i)
             if (std::max(geo[i].w, geo[i].h) <= solid_max) { solid_src = i; break; }
         if (solid_src == 0 || solid_src >= geo.size()) solid_src = geo.size();

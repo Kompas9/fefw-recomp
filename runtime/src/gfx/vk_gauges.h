@@ -11,8 +11,10 @@
 namespace nxrt {
 
 nxrt::GaugeCounter& vk_gauge_images();                  // vk.images            VkImage (Device::create_image / destroy_image)
+nxrt::GaugeCounter& vk_gauge_image_bytes();            // vk.images.bytes      memory of those images (their VMA allocations)
 nxrt::GaugeCounter& vk_gauge_image_views();             // vk.image_views       VkImageView (every owner)
 nxrt::GaugeCounter& vk_gauge_buffers();                 // vk.buffers           VkBuffer (Device::create_buffer / destroy_buffer, pools)
+nxrt::GaugeCounter& vk_gauge_buffer_bytes();           // vk.buffers.bytes     memory of the Device::create_buffer buffers in video memory (device-local)
 nxrt::GaugeCounter& vk_gauge_samplers();                // vk.samplers          VkSampler
 nxrt::GaugeCounter& vk_gauge_shader_modules();          // vk.shader_modules    VkShaderModule
 nxrt::GaugeCounter& vk_gauge_pipelines();               // vk.pipelines         VkPipeline (graphics)

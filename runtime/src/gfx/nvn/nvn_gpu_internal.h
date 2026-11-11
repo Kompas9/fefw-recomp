@@ -41,6 +41,7 @@ struct Counters {
     std::atomic<uint64_t> pools_imported{0}, unresolved_addresses{0}, unsupported_ops{0}, submit_replay_ns{0};
 };
 Counters& counters();
+bool counters_ready();   // false until the GPU back end is set up (counters() would read through a null pointer)
 Counters* counters_if();   // null before the GPU is up
 // An operation the back end does not implement was skipped: logged the first time per name, counted for the report.
 void note_unsupported(const char* what);
@@ -239,6 +240,11 @@ void tex_transition(Texture* t, Frame& f, VkImageLayout layout);
 // nvn_pipeline.cpp: tex_transition moves t to `layout`. A texture leaving its sampled layout is looked at again by the next draw that
 // samples through a pool array (pool_textures_to_prepare).
 void pool_note_layout(Texture* t, VkImageLayout layout);
+// nvn_pipeline.cpp, any thread: the CPU wrote t (or its prepared content changed): the pools it is registered in look at it again at their
+// next draw, without a scan of every registered texture.
+void pool_note_cpu_write(Texture* t);
+// nvn_pipeline.cpp, render thread: pool_textures_to_prepare calls that scanned every registered texture, and all calls (replay_stats).
+void pool_scan_counts(uint64_t* full_scans, uint64_t* looks);
 // nvn_pipeline.cpp: t's image and views were remade (tex_rescale) or released: the pool arrays write the ids it sits at again.
 void pool_texture_remade(Texture* t);
 VkImageLayout tex_layout(Texture* t);

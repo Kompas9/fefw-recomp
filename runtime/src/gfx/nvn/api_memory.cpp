@@ -78,6 +78,7 @@ void retire_pool(MemoryPool* p) {
     handles_release_pool(p);
     pool_unregister(p);
     p->dead.store(true);
+    lifetime_pool_retired(p);
 }
 
 // The guest pointer of the memory pool a texture or sampler pool was initialised with (byte 16 of the guest object).

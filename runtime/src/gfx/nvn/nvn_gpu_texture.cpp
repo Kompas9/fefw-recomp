@@ -65,6 +65,8 @@ struct TexGpu {
     VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT;
     VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;   // tracked layout (the same for every level and layer)
     bool failed = false;                                // no image: the texture is not usable on the GPU (logged once)
+    uint32_t retry_at = 0;                              // failed for want of memory: present count from which tex_or_null makes it again (0: never)
+    uint32_t retries = 0;                               // times it was made again after such a failure
     bool transcoded = false;                            // ASTC stored as BC7
     uint32_t drop = 0;                                  // NVN levels left out at the top ([gfx] texture_detail): image level i is NVN level i + drop
     bool mutable_fmt = false;                           // sRGB and UNORM views of the image are allowed
@@ -113,6 +115,7 @@ struct SparseState {
 };
 
 Texture::~Texture() {
+    lifetime_texture_freed(this);
     if (gpu) gpu::destroy_texture_gpu(gpu);
     gpu = nullptr;
 }
@@ -585,6 +588,7 @@ TexCensus tex_census() {
     const auto now = std::chrono::steady_clock::now();
     if (at != std::chrono::steady_clock::time_point{} && now - at < std::chrono::seconds(1)) return cached;
     TexCensus c;
+    if (!counters_ready()) return c;   // a gauge read (soak sampler) before the GPU is set up
     const uint32_t presents = static_cast<uint32_t>(counters().presents.load(std::memory_order_relaxed));
     {
         std::lock_guard<std::mutex> lk2(g_live_mu);
@@ -629,6 +633,8 @@ struct TexCensusGauges {
     }
 };
 TexCensusGauges g_tex_census_gauges;
+
+constexpr uint32_t kTexRetryPresents = 300;   // a texture whose image failed for want of memory is made again after this many presents (doubling, up to 16 times)
 
 TexGpu* create_texture_gpu(Texture* t, float want_scale) {
     auto* g = new TexGpu();
@@ -760,8 +766,21 @@ TexGpu* create_texture_gpu(Texture* t, float want_scale) {
         g->levels = is.levels;
     }
     std::string why2;
-    if (device().create_image(make_desc(is, chosen, usage, flags), &g->img, &why2) != VK_SUCCESS)
-        return fail("create_image: " + why2);
+    const VkResult cr = device().create_image(make_desc(is, chosen, usage, flags), &g->img, &why2);
+    if (cr == VK_ERROR_OUT_OF_DEVICE_MEMORY || cr == VK_ERROR_OUT_OF_HOST_MEMORY) {
+        // Out of memory is not the texture's fault: tex_or_null makes it again later (kTexRetryPresents). Under pressure thousands of
+        // textures can fail in a row: the first few are logged, then one in 256.
+        static std::atomic<uint32_t> n_oom{0};
+        const uint32_t k = n_oom.fetch_add(1, std::memory_order_relaxed);
+        if (k < 16 || (k - 16) % 256 == 255)
+            NXLOG_E(kTag, "texture %u: no image (out of memory: %s, %ux%u, %u levels, %u layers): not usable on the GPU until a retry (%u such failures)",
+                    t->id, why2.c_str(), is.base.width, is.base.height, is.levels, s.layers, k + 1);
+        g->failed = true;
+        g->retry_at = static_cast<uint32_t>(counters().presents.load(std::memory_order_relaxed)) + kTexRetryPresents;
+        counters().textures_failed.fetch_add(1);
+        return g;
+    }
+    if (cr != VK_SUCCESS) return fail("create_image: " + why2);
     {   // the census: the image's size in its format, and for an ASTC stand-in the size of the ASTC it replaces
         const bool bc8 = chosen >= VK_FORMAT_BC1_RGB_UNORM_BLOCK && chosen <= VK_FORMAT_BC1_RGBA_SRGB_BLOCK;
         const bool bc4 = chosen == VK_FORMAT_BC4_UNORM_BLOCK || chosen == VK_FORMAT_BC4_SNORM_BLOCK;
@@ -781,7 +800,30 @@ TexGpu* create_texture_gpu(Texture* t, float want_scale) {
 // The texture's image, created on first use. Null when the texture has no usable image (the failure is counted and logged once).
 TexGpu* tex_or_null(Texture* t, float want_scale = 1.0f) {
     if (!t || !active()) return nullptr;
-    if (t->gpu) return t->gpu->failed ? nullptr : t->gpu;
+    if (t->gpu) {
+        TexGpu* old = t->gpu;
+        if (!old->failed) return old;
+        // An image that failed for want of memory is made again once its wait is over: the old object (no image, no views) goes after the
+        // submissions recorded so far, and the texture pools that hold the texture get its new views.
+        const uint32_t now = static_cast<uint32_t>(counters().presents.load(std::memory_order_relaxed));
+        if (!old->retry_at || old->refs != 1 || static_cast<int32_t>(now - old->retry_at) < 0 || !on_render_thread()) return nullptr;
+        const uint32_t retries = old->retries + 1;
+        old->retry_at = 0;
+        t->gpu = nullptr;
+        destroy_texture_gpu(old);
+        counters().textures_failed.fetch_sub(1);
+        NXFT_MIN("tex.create", 30000);
+        TexGpu* g = create_texture_gpu(t, want_scale);
+        g->retries = retries;
+        if (g->failed) {
+            if (g->retry_at) g->retry_at = now + (kTexRetryPresents << std::min<uint32_t>(retries, 4));
+            return nullptr;
+        }
+        static int logged = 0;
+        if (logged++ < 60) NXLOG_I(kTag, "texture %u: image made on retry %u after running out of memory", t->id, retries);
+        pool_texture_remade(t);
+        return g;
+    }
     if (Ref<Texture> alias = texture_registry_find_alias(t)) {
         TexGpu* ag = alias->gpu;
         if (ag && !ag->failed) {
@@ -1163,8 +1205,17 @@ const VkComponentMapping kIdentity = {};
 struct Dummy {
     gfx::Image img;
     VkImageView view = VK_NULL_HANDLE;
-    bool tried = false;
+    bool tried = false;           // made (set on success only)
+    uint32_t next_try = 0;        // after a failure: present count of the next attempt
 };
+
+// A dummy whose image failed (out of memory) is tried again 60 presents later; until then the caller gets a null view.
+bool dummy_due(Dummy& d) {
+    if (d.tried) return false;
+    const uint32_t now = static_cast<uint32_t>(counters().presents.load(std::memory_order_relaxed));
+    return !d.next_try || static_cast<int32_t>(now - d.next_try) >= 0;
+}
+void dummy_failed(Dummy& d) { d.next_try = static_cast<uint32_t>(counters().presents.load(std::memory_order_relaxed)) + 60; }
 constexpr VkImageViewType kDummyTypes[6] = {VK_IMAGE_VIEW_TYPE_1D, VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_VIEW_TYPE_2D_ARRAY,
                                             VK_IMAGE_VIEW_TYPE_CUBE, VK_IMAGE_VIEW_TYPE_CUBE_ARRAY, VK_IMAGE_VIEW_TYPE_3D};
 
@@ -1185,7 +1236,6 @@ struct Shared {
 Shared g_sh;
 
 bool make_dummy(Dummy& d, VkImageViewType type, bool depth, int component) {
-    d.tried = true;
     const VkFormat fmt = depth ? VK_FORMAT_D32_SFLOAT : component == 2 ? VK_FORMAT_R8G8B8A8_SINT :
                          component == 3 ? VK_FORMAT_R8G8B8A8_UINT : VK_FORMAT_R8G8B8A8_UNORM;
     gfx::ImageDesc id;
@@ -1205,7 +1255,9 @@ bool make_dummy(Dummy& d, VkImageViewType type, bool depth, int component) {
     }
     std::string why;
     if (device().create_image(id, &d.img, &why) != VK_SUCCESS) {
-        NXLOG_W(kTag, "dummy view image failed: %s", why.c_str());
+        static int logged = 0;
+        if (logged++ < 8) NXLOG_W(kTag, "dummy view image failed: %s", why.c_str());
+        dummy_failed(d);
         return false;
     }
     const VkImageAspectFlags asp = depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
@@ -1226,6 +1278,7 @@ bool make_dummy(Dummy& d, VkImageViewType type, bool depth, int component) {
     if (!ok) {
         NXLOG_W(kTag, "dummy view clear failed");
         device().destroy_image(d.img);
+        dummy_failed(d);
         return false;
     }
     VkImageViewCreateInfo vi = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
@@ -1236,9 +1289,11 @@ bool make_dummy(Dummy& d, VkImageViewType type, bool depth, int component) {
     if (vkCreateImageView(vkdev(), &vi, nullptr, &d.view) != VK_SUCCESS) {
         d.view = VK_NULL_HANDLE;
         device().destroy_image(d.img);
+        dummy_failed(d);
         return false;
     }
     vk_gauge_image_views().add(1);
+    d.tried = true;
     return true;
 }
 
@@ -2176,7 +2231,7 @@ VkImageView dummy_view(VkImageViewType type, bool depth_compare) { return dummy_
 VkImageView dummy_view(VkImageViewType type, bool depth_compare, int component) {
     const int idx = dummy_index(type);
     Dummy& d = (depth_compare ? g_sh.depth : component == 2 ? g_sh.sint : component == 3 ? g_sh.uint : g_sh.color)[idx];
-    if (!d.tried) make_dummy(d, kDummyTypes[idx], depth_compare, component);
+    if (dummy_due(d)) make_dummy(d, kDummyTypes[idx], depth_compare, component);
     return d.view;
 }
 
@@ -2185,8 +2240,7 @@ VkImageView dummy_storage_view(VkImageViewType type, VkFormat format) {
     if (type == VK_IMAGE_VIEW_TYPE_CUBE || type == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY) type = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
     const std::pair<int, int> key = {static_cast<int>(type), static_cast<int>(format)};
     auto& d = g_sh.storage[key];
-    if (d.tried) return d.view;
-    d.tried = true;
+    if (!dummy_due(d)) return d.view;
     gfx::ImageDesc id;
     id.format = format;
     id.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
@@ -2197,7 +2251,9 @@ VkImageView dummy_storage_view(VkImageViewType type, VkFormat format) {
     if (type == VK_IMAGE_VIEW_TYPE_2D_ARRAY || type == VK_IMAGE_VIEW_TYPE_1D_ARRAY) id.array_layers = 6;
     std::string why;
     if (device().create_image(id, &d.img, &why) != VK_SUCCESS) {
-        NXLOG_W(kTag, "dummy storage image failed: %s", why.c_str());
+        static int logged = 0;
+        if (logged++ < 8) NXLOG_W(kTag, "dummy storage image failed: %s", why.c_str());
+        dummy_failed(d);
         return d.view;
     }
     const VkImage img = d.img.image;
@@ -2211,6 +2267,7 @@ VkImageView dummy_storage_view(VkImageViewType type, VkFormat format) {
     });
     if (!ok) {
         device().destroy_image(d.img);
+        dummy_failed(d);
         return d.view;
     }
     VkImageViewCreateInfo vi = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
@@ -2221,8 +2278,10 @@ VkImageView dummy_storage_view(VkImageViewType type, VkFormat format) {
     if (vkCreateImageView(vkdev(), &vi, nullptr, &d.view) != VK_SUCCESS) {
         d.view = VK_NULL_HANDLE;
         device().destroy_image(d.img);
+        dummy_failed(d);
     } else {
         vk_gauge_image_views().add(1);
+        d.tried = true;
     }
     return d.view;
 }
@@ -2635,15 +2694,7 @@ void texture_registered(Texture* t) { texprep::on_registered(t); }
 // transcoded, depth and format-fallback textures are not read back.
 bool download_texture(Texture* t) {
     if (!t || !active() || !t->mem || !t->fmt || !t->block_linear) return false;
-    TexGpu* g = t->gpu;
-    if (!g || g->failed || g->depth || g->transcoded || g->sparse || g->format != t->fmt->vk) return false;
-    if (g->scale != 1.0f) {
-        static int logged = 0;
-        if (logged++ < 10) NXLOG_W(kTag, "texture %u: a scaled render target is not read back into game memory", t->id);
-        return false;
-    }
     if (t->cpu_dirty.load()) return false;
-    if (!(g->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) || g->layout == VK_IMAGE_LAYOUT_UNDEFINED) return false;
     const TexLayout L = compute_texture_layout(t->b);
     if (!L.valid || !L.block_linear) return false;
     const uint64_t size = L.layout.linear_size;
@@ -2651,6 +2702,15 @@ bool download_texture(Texture* t) {
     finish();   // earlier submissions must be done before the copy reads the image
     gfx::Buffer rb;
     run_frame_sync([&](Frame& f) {
+        // The image's state (made again, rescaled, its layout) belongs to the render thread: it is looked at here, in the job.
+        TexGpu* g = t->gpu;
+        if (!g || g->failed || g->depth || g->transcoded || g->sparse || g->format != t->fmt->vk) return;
+        if (g->scale != 1.0f) {
+            static int logged = 0;
+            if (logged++ < 10) NXLOG_W(kTag, "texture %u: a scaled render target is not read back into game memory", t->id);
+            return;
+        }
+        if (!(g->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) || g->layout == VK_IMAGE_LAYOUT_UNDEFINED) return;
         if (device().create_buffer(size, VK_BUFFER_USAGE_TRANSFER_DST_BIT, gfx::MemoryUse::Readback, &rb, "nvn texture readback") != VK_SUCCESS)
             return;
         const VkImageLayout prev = g->layout;

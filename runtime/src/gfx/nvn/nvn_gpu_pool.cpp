@@ -9,6 +9,7 @@
 #include <condition_variable>
 #include <deque>
 #include <mutex>
+#include <optional>
 #include <memory>
 #include <string>
 #include <thread>
@@ -48,6 +49,9 @@ struct PoolChunk {
     bool copy_tried = false;
     bool tried = false;               // import attempted
     bool failed = false;
+    PoolGpu* owner = nullptr;         // copy fallback: the pool, for the retried import (pool_copy_begin)
+    uint32_t retry_at = 0;            // copy fallback: present count at which the real import is tried again
+    uint32_t retry_wait = 0;          // ... and the presents to wait after that one fails (doubles)
 };
 
 // A pool is imported whole (one chunk; the background importer does it) or, when it is larger than one chunk ([nvn] pool_import_chunk_mb), in
@@ -70,6 +74,7 @@ struct PoolGpu {
 };
 
 MemoryPool::~MemoryPool() {
+    lifetime_pool_freed(this);
     if (gpu) gpu::destroy_pool_gpu(gpu);
     gpu = nullptr;
     if (PoolGpu* pf = prefetched.exchange(nullptr)) gpu::destroy_pool_gpu(pf);   // imported in the background and never used
@@ -115,6 +120,20 @@ constexpr uint64_t kSlab = 16ull << 20;
 std::mutex g_copies_mu;
 std::unordered_set<PoolChunk*> g_copies;
 std::atomic<bool> g_have_copies{false};
+std::atomic<bool> g_copy_touched{false};   // the submission being recorded uses a copy buffer (render thread sets it, pool_copy_begin clears it)
+// A pool part on a copy buffer tries the real import again after this many presents, then after twice that, up to 16 times as long (the
+// import failed under memory pressure, which may be gone a minute later).
+constexpr uint32_t kImportRetryPresents = 600;
+constexpr uint32_t kImportRetryMax = kImportRetryPresents * 16;
+uint32_t presents_now();
+bool out_uses_buffer(VkBuffer b);
+
+// Failures that can repeat once per resource under memory pressure: the first `first` of a kind are logged, then one in 256.
+bool log_rate(std::atomic<uint32_t>& n, uint32_t first = 16) {
+    const uint32_t k = n.fetch_add(1, std::memory_order_relaxed);
+    return k < first || (k - first) % 256 == 255;
+}
+std::atomic<uint32_t> g_log_import_fail{0}, g_log_headroom{0}, g_log_fallback{0};
 
 
 // Only batch committed pages. Pinning SEC_RESERVE gaps is invalid on AMD.
@@ -183,6 +202,11 @@ bool import_range(PoolGpu* g, PoolChunk& c, uint64_t off, uint64_t size, const c
         }
     }
 
+    // The driver reads and writes back every page it imports (vkAllocateMemory pins them); a write of the game's landing in between was
+    // lost (issue 97: one byte of a file the game was loading next to the pool, and its zstd frame never decompressed). Through a private
+    // view the game's own view can be made read-only meanwhile: its writes to these pages wait for the import (mem::ww::ImportFreeze).
+    std::optional<mem::ww::ImportFreeze> freeze;
+    if (c.view) freeze.emplace(reinterpret_cast<const void*>(start), size);
     VkMemoryHostPointerPropertiesEXT hp = {VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
     VkResult r;
     const auto tm0 = std::chrono::steady_clock::now();
@@ -226,18 +250,21 @@ bool import_range(PoolGpu* g, PoolChunk& c, uint64_t off, uint64_t size, const c
         const bool pressure = limit > 128 && static_cast<uint64_t>(vk_gauge_memory_allocs().get()) >= limit - 128;
         if (pressure || (inject && size <= 65536 && !injected.exchange(true))) {
             r = VK_ERROR_INVALID_EXTERNAL_HANDLE;
-            NXLOG_W(kTag, "host import skipped (%s)", pressure ? "allocation headroom" : "diagnostic fault injection");
+            if (!pressure || log_rate(g_log_headroom))
+                NXLOG_W(kTag, "host import skipped (%s)", pressure ? "allocation headroom" : "diagnostic fault injection");
         } else r = vkAllocateMemory(dev.device(), &mai, nullptr, &c.mem);
     }
     const auto tm2 = std::chrono::steady_clock::now();
     if (r != VK_SUCCESS) {
-        NXLOG_E(kTag, "importing pool %p %s %zu of %zu (offset 0x%llx, 0x%llx bytes) failed (%d)", static_cast<void*>(g->base), what, index, count,
-                static_cast<unsigned long long>(off), static_cast<unsigned long long>(size), static_cast<int>(r));
+        if (log_rate(g_log_import_fail))
+            NXLOG_E(kTag, "importing pool %p %s %zu of %zu (offset 0x%llx, 0x%llx bytes) failed (%d)", static_cast<void*>(g->base), what, index, count,
+                    static_cast<unsigned long long>(off), static_cast<unsigned long long>(size), static_cast<int>(r));
         g_import_failures.add(1);
         c.mem = VK_NULL_HANDLE;
         c.failed = true;
         return false;
     }
+    freeze.reset();
     if (r == VK_SUCCESS) r = vkBindBufferMemory(dev.device(), c.buffer, c.mem, 0);
     if (r != VK_SUCCESS) {
         NXLOG_E(kTag, "buffer over pool %p %s %zu of %zu failed (%d)", static_cast<void*>(g->base), what, index, count, static_cast<int>(r));
@@ -331,6 +358,17 @@ PoolGpu* import_pool(MemoryPool* p) {
 
 bool copy_fallback(PoolGpu* g, PoolChunk& c, uint64_t off, uint64_t size) {
     if (c.failed && !c.copy_tried) {
+        // The snapshot is allocated before the chunk is touched: out of memory leaves it as it was (failed, and not tried again).
+        std::vector<uint8_t> snap;
+        try {
+            snap.resize(static_cast<size_t>(size));
+        } catch (const std::bad_alloc&) {
+            c.copy_tried = true;
+            if (log_rate(g_log_fallback))
+                NXLOG_E(kTag, "pool import fallback: no memory for a %llu KiB snapshot: pool %p offset 0x%llx is not usable on the GPU",
+                        static_cast<unsigned long long>(size >> 10), static_cast<void*>(g->base), static_cast<unsigned long long>(off));
+            return false;
+        }
         destroy_chunk(c);
         c.tried = c.copy_tried = true;
         c.off = off;
@@ -345,9 +383,13 @@ bool copy_fallback(PoolGpu* g, PoolChunk& c, uint64_t off, uint64_t size) {
             return false;
         }
         c.copy_used = true;
+        g_copy_touched.store(true, std::memory_order_relaxed);
         c.buffer = c.copy.buffer;
         c.host = g->base + off;
-        c.snapshot.resize(static_cast<size_t>(size));
+        c.owner = g;
+        c.retry_wait = kImportRetryPresents;
+        c.retry_at = presents_now() + kImportRetryPresents;
+        c.snapshot = std::move(snap);
         std::memcpy(c.snapshot.data(), c.host, static_cast<size_t>(size));
         std::memcpy(c.copy.mapped, c.snapshot.data(), static_cast<size_t>(size));
         device().flush_buffer(c.copy);
@@ -355,7 +397,9 @@ bool copy_fallback(PoolGpu* g, PoolChunk& c, uint64_t off, uint64_t size) {
         g_copy_fallbacks.add(1);
         g_copies.insert(&c);
         g_have_copies.store(true);
-        NXLOG_W(kTag, "pool import fallback: %llu KiB; submissions using copy buffers are synchronized", (unsigned long long)(size >> 10));
+        if (log_rate(g_log_fallback))
+            NXLOG_W(kTag, "pool import fallback: %llu KiB; submissions using copy buffers are synchronized (the import is tried again in %u presents)",
+                    (unsigned long long)(size >> 10), kImportRetryPresents);
     }
     return !c.failed && c.buffer;
 }
@@ -366,6 +410,7 @@ void copy_touch(PoolChunk& c) {
     std::memcpy(c.copy.mapped, c.snapshot.data(), static_cast<size_t>(c.size));
     device().flush_buffer(c.copy);
     c.copy_used = true;
+    g_copy_touched.store(true, std::memory_order_relaxed);
 }
 
 // Chunk k of g, imported now if it was not tried yet (render thread). Null when it cannot be imported.
@@ -545,11 +590,54 @@ void pool_copy_retire(PoolGpu* p) {
     for (PoolChunk& c : p->chunks) if (c.copy.buffer) c.host = nullptr;
     for (PoolChunk& c : p->spans) if (c.copy.buffer) c.host = nullptr;
 }
-bool pool_copy_pending() { return g_have_copies.load(); }
+// True while recording a submission that uses a copy buffer: that submission is waited for and its GPU writes are copied back (nvn_gpu.cpp).
+// Submissions that touch no copy buffer are not synchronized, even while copies exist.
+bool pool_copy_pending() { return g_copy_touched.load(std::memory_order_relaxed); }
+
+namespace {
+// Pool parts on copy buffers whose retry is due try the real import again (start of a submission, render thread). The copy buffer's last
+// user was a synchronized submission whose writes are back in the pool, so on success the copy is dropped (destroyed after the submissions
+// made so far) and the chunk is the import from now on.
+void retry_imports() {
+    const uint32_t now = presents_now();
+    std::vector<PoolChunk*> due;
+    {
+        std::lock_guard<std::mutex> lock(g_copies_mu);
+        for (PoolChunk* c : g_copies)
+            if (c->host && c->owner && c->retry_at && static_cast<int32_t>(now - c->retry_at) >= 0) due.push_back(c);
+    }
+    for (PoolChunk* c : due) {
+        // a compute result waiting to be copied back into this buffer (out_add) keeps it until the entry is gone
+        if (out_uses_buffer(c->copy.buffer)) { c->retry_at = now + 60; continue; }
+        PoolChunk fresh;
+        if (!import_range(c->owner, fresh, c->off, c->size, "retry", 0, 1)) {
+            destroy_chunk(fresh);
+            c->retry_wait = std::min<uint32_t>(std::max<uint32_t>(c->retry_wait, kImportRetryPresents) * 2, kImportRetryMax);
+            c->retry_at = now + c->retry_wait;
+            continue;
+        }
+        {
+            std::lock_guard<std::mutex> lock(g_copies_mu);
+            g_copies.erase(c);
+            g_have_copies.store(!g_copies.empty());
+        }
+        NXLOG_I(kTag, "pool %p: offset 0x%llx, %llu KiB imported on a retry: its copy buffer is dropped", static_cast<void*>(c->owner->base),
+                static_cast<unsigned long long>(c->off), static_cast<unsigned long long>(c->size >> 10));
+        auto* old = new PoolChunk(std::move(*c));
+        *c = std::move(fresh);
+        defer_destroy([old] { destroy_chunk(*old); delete old; });
+    }
+}
+}  // namespace
+
 void pool_copy_begin() {
-    if (!pool_copy_pending()) return;
-    std::lock_guard<std::mutex> lock(g_copies_mu);
-    for (PoolChunk* c : g_copies) c->copy_used = false;
+    g_copy_touched.store(false, std::memory_order_relaxed);
+    if (!g_have_copies.load()) return;
+    {
+        std::lock_guard<std::mutex> lock(g_copies_mu);
+        for (PoolChunk* c : g_copies) c->copy_used = false;
+    }
+    retry_imports();
 }
 void pool_copy_end() {
     if (!pool_copy_pending()) return;
@@ -558,9 +646,15 @@ void pool_copy_end() {
         if (!c->host || !c->copy_used) continue;
         device().invalidate_buffer(c->copy);
         const auto* data = static_cast<const uint8_t*>(c->copy.mapped);
-        // Only GPU-modified bytes are copied back: preserve unrelated concurrent CPU writes.
-        for (size_t i = 0; i < c->size; ++i)
-            if (data[i] != c->snapshot[i]) c->host[i] = data[i];
+        const uint8_t* snap = c->snapshot.data();
+        // Only GPU-modified bytes are copied back: preserve unrelated concurrent CPU writes. Pages the GPU did not change are skipped whole.
+        const size_t n = static_cast<size_t>(c->size);
+        for (size_t p = 0; p < n; p += 4096) {
+            const size_t e = std::min<size_t>(n, p + 4096);
+            if (!std::memcmp(data + p, snap + p, e - p)) continue;
+            for (size_t i = p; i < e; ++i)
+                if (data[i] != snap[i]) c->host[i] = data[i];
+        }
     }
 }
 
@@ -1197,6 +1291,15 @@ std::vector<OutEntry> g_out;
 std::vector<Mirror*> g_out_mirrors;
 std::atomic<size_t> g_out_n{0};
 std::atomic<uint64_t> g_out_lo{UINT64_MAX}, g_out_hi{0};   // address bounds of the entries (render thread; a quick filter)
+
+// An entry copies into b (a pool import, or a copy buffer standing in for one: retry_imports keeps that one while this holds).
+bool out_uses_buffer(VkBuffer b) {
+    if (!b || !g_out_n.load(std::memory_order_acquire)) return false;
+    std::lock_guard<std::mutex> lk(g_out_mu);
+    for (const OutEntry& e : g_out)
+        if (e.hbuf == b) return true;
+    return false;
+}
 // Bumped (under g_out_mu, before it is released) by every function that adds, removes or re-flags entries: out_overlaps rebuilds its
 // index when it moved (read without the lock).
 std::atomic<uint64_t> g_out_gen{0};

@@ -142,7 +142,7 @@ void schedule_locked(Texture* t) {
     if (e.st == Entry::Queued) return;                // the job reads the generation when it starts
     if (e.st == Entry::Running) { e.again = true; return; }
     if (e.st == Entry::Waiting) { leave_waiting_locked(t); e.st = Entry::Idle; }
-    if (e.st == Entry::Done) drop_result(e);          // its content is older than the new write
+    if (e.st == Entry::Done) { drop_result(e); e.st = Entry::Idle; }   // its content is older than the new write
     uint64_t est = std::min<uint64_t>(t->storage_size, 1ull << 30);
     // [gfx] astc_quality = uncompressed: a job holds the texture as RGBA8, 4 bytes a texel against 16 per ASTC block
     if (t->fmt && t->fmt->astc && !S().caps.astc && astc_quality() == AstcQuality::Uncompressed) est = std::min<uint64_t>(est * t->fmt->block_w * t->fmt->block_h / 4, 1ull << 30);
@@ -150,7 +150,8 @@ void schedule_locked(Texture* t) {
     while (s.held_bytes + est > s.budget) {
         auto victim = s.map.end();
         for (auto it = s.map.begin(); it != s.map.end(); ++it)
-            if (it->second.st == Entry::Done && (victim == s.map.end() || it->second.seq < victim->second.seq)) victim = it;
+            // not t itself: e refers to its node, and erasing it here had the code below write into freed memory
+            if (it->first != t && it->second.st == Entry::Done && (victim == s.map.end() || it->second.seq < victim->second.seq)) victim = it;
         if (victim == s.map.end()) break;
         drop_result(victim->second);
         s.map.erase(victim);
@@ -293,7 +294,10 @@ void worker_main() {
             stage = gfx::Buffer{};
             e2.st = Entry::Done;
             // the image holds a quick stand-in of this content: the next use uploads this result (cpu_dirty without a new generation)
-            if (t->prep_prov.load(std::memory_order_acquire) == (gen | 0x80000000u)) t->cpu_dirty.store(true);
+            if (t->prep_prov.load(std::memory_order_acquire) == (gen | 0x80000000u)) {
+                t->cpu_dirty.store(true);
+                gpu::pool_note_cpu_write(t);   // a texture drawn through a pool takes the final content too
+            }
         } else {
             if (ok) s.st.stale++;
             e2.st = Entry::Idle;
@@ -419,6 +423,7 @@ void on_flushed(Texture* t) {
     if (!t) return;
     t->prep_gen.fetch_add(1, std::memory_order_acq_rel);
     g_tex_scan_epoch.fetch_add(1, std::memory_order_relaxed);        // handles looked at before may now lead to a dirty texture
+    gpu::pool_note_cpu_write(t);                                     // the pools it is registered in look at it (no scan of every texture)
     // Sparse textures (the big volumes): tiles are mapped and written range by range, each reported here. Once a pool or a command list has named the
     // texture, a job follows the writes and starts when they stop.
     if (t->vpool && (t->prep_flags.load(std::memory_order_acquire) & kWanted) && enabled() && gpu::active() && eligible(t)) {
@@ -589,7 +594,11 @@ void provisional_uploaded(Texture* t) {
     auto it = s.map.find(t);
     if (it != s.map.end()) {
         Entry& e = it->second;
-        if (e.st == Entry::Done && e.job_gen == gen) { t->cpu_dirty.store(true); return; }   // finished meanwhile: used at the next upload
+        if (e.st == Entry::Done && e.job_gen == gen) {   // finished meanwhile: used at the next upload
+            t->cpu_dirty.store(true);
+            gpu::pool_note_cpu_write(t);
+            return;
+        }
         if (e.st == Entry::Running && e.job_gen == gen) return;                             // the worker marks the texture when it is done
         if (e.st == Entry::Queued || e.st == Entry::Waiting) return;
     }

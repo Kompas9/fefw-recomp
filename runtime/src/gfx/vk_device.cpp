@@ -52,8 +52,19 @@ VKAPI_ATTR VkResult VKAPI_CALL counted_allocate_memory(VkDevice d, const VkMemor
         vk_gauge_memory_bytes().add(static_cast<int64_t>(info->allocationSize));
     } else {
         *out = VK_NULL_HANDLE;
-        NXLOG_E("vk.memory", "allocation failed (%d), bytes %llu, live %lld", int(r),
-                (unsigned long long)info->allocationSize, (long long)vk_gauge_memory_allocs().get());
+        // At most one line a second, with the failures since the last line: under memory pressure VMA retries every allocation and the
+        // game streams on, so a failure can repeat thousands of times a second and the log writes alone stalled the render thread.
+        static std::atomic<uint64_t> failures{0}, reported{0}, last_ms{0};
+        const uint64_t n = failures.fetch_add(1, std::memory_order_relaxed) + 1;
+        const uint64_t now = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                       std::chrono::steady_clock::now().time_since_epoch()).count()) + 1000;   // never 0
+        uint64_t last = last_ms.load(std::memory_order_relaxed);
+        if ((last == 0 || now - last >= 1000) && last_ms.compare_exchange_strong(last, now, std::memory_order_relaxed)) {
+            const uint64_t before = reported.exchange(n, std::memory_order_relaxed);
+            NXLOG_E("vk.memory", "allocation failed (%d), bytes %llu, live %lld (%llu failures since the last line, %llu in all)", int(r),
+                    (unsigned long long)info->allocationSize, (long long)vk_gauge_memory_allocs().get(), (unsigned long long)(n - before),
+                    (unsigned long long)n);
+        }
     }
     return r;
 }
@@ -73,8 +84,10 @@ VKAPI_ATTR void VKAPI_CALL counted_free_memory(VkDevice d, VkDeviceMemory memory
 
 // ---- live-object gauges (declared in vk_gauges.h) -------------------------------------------------------------------------------
 nxrt::GaugeCounter& vk_gauge_images() { static nxrt::GaugeCounter g("vk.images"); return g; }
+nxrt::GaugeCounter& vk_gauge_image_bytes() { static nxrt::GaugeCounter g("vk.images.bytes"); return g; }
 nxrt::GaugeCounter& vk_gauge_image_views() { static nxrt::GaugeCounter g("vk.image_views"); return g; }
 nxrt::GaugeCounter& vk_gauge_buffers() { static nxrt::GaugeCounter g("vk.buffers"); return g; }
+nxrt::GaugeCounter& vk_gauge_buffer_bytes() { static nxrt::GaugeCounter g("vk.buffers.bytes"); return g; }
 nxrt::GaugeCounter& vk_gauge_samplers() { static nxrt::GaugeCounter g("vk.samplers"); return g; }
 nxrt::GaugeCounter& vk_gauge_shader_modules() { static nxrt::GaugeCounter g("vk.shader_modules"); return g; }
 nxrt::GaugeCounter& vk_gauge_pipelines() { static nxrt::GaugeCounter g("vk.pipelines"); return g; }
@@ -1049,6 +1062,7 @@ VkResult Device::create_image(const ImageDesc& d, Image* out, std::string* why) 
     {   // very large images are worth a line: they decide the process' memory footprint
         VmaAllocationInfo inf{};
         vmaGetAllocationInfo(vma_, alloc, &inf);
+        vk_gauge_image_bytes().add(static_cast<int64_t>(inf.size));
         if (inf.size >= (256ull << 20))
             NXLOG_I(kTag, "large image '%s': %ux%ux%u, %u levels, %u layers, format %d, %llu MB", d.name ? d.name : "?", d.width, d.height, d.depth,
                     d.mip_levels, d.array_layers, static_cast<int>(d.format), static_cast<unsigned long long>(inf.size >> 20));
@@ -1070,6 +1084,9 @@ VkResult Device::create_image(const ImageDesc& d, Image* out, std::string* why) 
         vi.subresourceRange = {aspect_of(d.format), 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS};
         r = vkCreateImageView(device_, &vi, nullptr, &img.view);
         if (r != VK_SUCCESS) {
+            VmaAllocationInfo inf{};
+            vmaGetAllocationInfo(vma_, alloc, &inf);
+            vk_gauge_image_bytes().sub(static_cast<int64_t>(inf.size));
             vmaDestroyImage(vma_, handle, alloc);
             vk_gauge_images().sub(1);
             if (why) *why = "vkCreateImageView failed (" + std::to_string(r) + ")";
@@ -1084,7 +1101,15 @@ VkResult Device::create_image(const ImageDesc& d, Image* out, std::string* why) 
 
 void Device::destroy_image(Image& img) {
     if (img.view) { vkDestroyImageView(device_, img.view, nullptr); vk_gauge_image_views().sub(1); }
-    if (img.image) { vmaDestroyImage(vma_, img.image, img.allocation); vk_gauge_images().sub(1); }
+    if (img.image) {
+        if (img.allocation) {
+            VmaAllocationInfo inf{};
+            vmaGetAllocationInfo(vma_, img.allocation, &inf);
+            vk_gauge_image_bytes().sub(static_cast<int64_t>(inf.size));
+        }
+        vmaDestroyImage(vma_, img.image, img.allocation);
+        vk_gauge_images().sub(1);
+    }
     img = Image{};
 }
 
@@ -1108,6 +1133,11 @@ VkResult Device::create_buffer(VkDeviceSize size, VkBufferUsageFlags usage, Memo
     VkResult r = vmaCreateBuffer(vma_, &bi, &ai, &b.buffer, &b.allocation, &info);
     if (r != VK_SUCCESS) return r;
     vk_gauge_buffers().add(1);
+    {
+        VkMemoryPropertyFlags mp = 0;
+        vmaGetAllocationMemoryProperties(vma_, b.allocation, &mp);
+        if (mp & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) vk_gauge_buffer_bytes().add(static_cast<int64_t>(info.size));
+    }
     if (use == MemoryUse::Upload || use == MemoryUse::Staging || use == MemoryUse::Readback) {      // S34: where host-visible buffers live (device-local host-visible = resizable BAR, else system memory)
         static std::atomic<int> logged{0};
         VkMemoryPropertyFlags mp = 0;
@@ -1131,7 +1161,19 @@ VkResult Device::create_buffer(VkDeviceSize size, VkBufferUsageFlags usage, Memo
 }
 
 void Device::destroy_buffer(Buffer& b) {
-    if (b.buffer) { vmaDestroyBuffer(vma_, b.buffer, b.allocation); vk_gauge_buffers().sub(1); }
+    if (b.buffer) {
+        if (b.allocation) {
+            VkMemoryPropertyFlags mp = 0;
+            vmaGetAllocationMemoryProperties(vma_, b.allocation, &mp);
+            if (mp & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) {
+                VmaAllocationInfo inf{};
+                vmaGetAllocationInfo(vma_, b.allocation, &inf);
+                vk_gauge_buffer_bytes().sub(static_cast<int64_t>(inf.size));
+            }
+        }
+        vmaDestroyBuffer(vma_, b.buffer, b.allocation);
+        vk_gauge_buffers().sub(1);
+    }
     b = Buffer{};
 }
 

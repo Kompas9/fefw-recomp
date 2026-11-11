@@ -1094,7 +1094,7 @@ void Overlay::Impl::draw_counter(const FrameInfo& f, double now_s) {
 bool Overlay::Impl::note_visible(double now_s) {
     if (!note_read) {
         note_read = true;
-        note_enabled = nxrt::config_get_bool("nvn", "compile_note", true);
+        note_enabled = nxrt::config_get_bool("nvn", "compile_note", false);
     }
     const int pending = shader_backlog();
     if (!note_enabled) return false;

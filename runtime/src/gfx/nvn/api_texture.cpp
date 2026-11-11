@@ -299,6 +299,7 @@ NVNboolean nvnTextureInitialize(NVNtexture* texture, const NVNtextureBuilder* bu
         be::texture_registry_remove_virtual(old);
         overflow_gone(old);
         old->destroyed.store(true);
+        be::lifetime_texture_finalized();
         gpu::release_texture_gpu(old);
     }
     be::bind_guest(texture, t);                              // the guest object takes the one reference of t
@@ -316,6 +317,7 @@ void nvnTextureFinalize(NVNtexture* texture) {
     if (!t) return;
     be::tev(t, "finalize");
     t->destroyed.store(true);
+    be::lifetime_texture_finalized();
     gpu::release_texture_gpu(t);
     be::texture_registry_remove(t);
     be::texture_registry_remove_virtual(t);

@@ -87,10 +87,13 @@ struct Gpu {
     std::vector<Slot*> batch;
     uint32_t batch_max = 1;
     // submit_batch = frame: the batch is not flushed when the render thread runs out of work; it goes with the present, in the present's
-    // own vkQueueSubmit2 (take_batch_for_present), or earlier when a thread waits for one of its serials (flush_wanted).
+    // own vkQueueSubmit2 (take_batch_for_present), or earlier when a thread waits for one of its serials (flush_want_serial).
     bool frame_batch = false;
     std::atomic<uint64_t> flushed_pub{0};          // `flushed`, readable from any thread
-    std::atomic<bool> flush_wanted{false};         // a thread waits for (or polls) a serial still in the batch
+    // The highest serial a thread waits for (or polls), kept as a maximum and never cleared: the batch is flushed as soon as it holds a
+    // serial >= this one that is not flushed yet. A serial asked for before the render thread has recorded it is flushed when it is
+    // recorded (a bool cleared by the next flush lost such a request: the waiter hung until a present that it was the one to queue).
+    std::atomic<uint64_t> flush_want_serial{0};
     uint64_t recording = 0;               // render thread: serial of the submission being recorded (0 outside)
     std::atomic<uint64_t> last_submitted{0};
     // Serials are handed out when a submission is queued (the game thread gets its serial at once and goes on while the render thread
@@ -133,6 +136,12 @@ struct Gpu {
 
 Gpu* g = nullptr;
 void flush_batch();   // [nvn] submit_batch, below
+// submit_batch = frame: a thread waits for a serial of the batch (render thread; the batch only changes there).
+bool batch_flush_wanted() {
+    if (g->batch.empty()) return false;
+    const uint64_t want = g->flush_want_serial.load();
+    return want > g->flushed && g->batch.back()->serial >= want;
+}
 std::mutex g_install_mu;
 std::atomic<uint64_t> g_copy_inflight{0};
 std::mutex g_copy_done_mu;
@@ -205,14 +214,14 @@ void render_loop() {
         std::function<void()> job;
         {
             std::unique_lock<std::mutex> lk(g->qmu);
-            if (!g->batch.empty() && (g->flush_wanted.load() || (!g->frame_batch && !g->stop && g->queue.empty()))) {
+            if (!g->batch.empty() && (batch_flush_wanted() || (!g->frame_batch && !g->stop && g->queue.empty()))) {
                 lk.unlock();
                 flush_batch();      // nothing more to record for now (or a thread waits for it): the GPU gets what there is
                 lk.lock();
             }
             if (!g->stop && g->queue.empty()) {
                 nxrt::HitchTimer ht(nxrt::kHpRenderIdle);      // the hitch line: the render thread waited for the game
-                g->qcv.wait(lk, [] { return g->stop || !g->queue.empty() || (g->flush_wanted.load() && !g->batch.empty()); });
+                g->qcv.wait(lk, [] { return g->stop || !g->queue.empty() || batch_flush_wanted(); });
                 if (g->queue.empty() && !g->stop) continue;    // woken to flush
             }
             if (g->queue.empty()) {   // stop requested and drained
@@ -306,15 +315,23 @@ void flush_batch() {
     }
     g->flushed = serial;
     g->flushed_pub.store(serial);
-    g->flush_wanted.store(false);
     g->batch.clear();
     g->ctr.submits.fetch_add(1);
 }
 
-// submit_batch = frame: a thread outside the render thread waits for a serial that may still sit in the batch; the render thread flushes
-// it at once instead of with the next present (which that thread may be the one to queue).
-void want_flush(uint64_t serial) {
-    if (!g->frame_batch || serial <= g->flushed_pub.load() || g->flush_wanted.exchange(true)) return;
+// submit_batch = frame: a thread outside the render thread waits for a serial that may still sit in the batch (or not be recorded yet);
+// the render thread flushes it as soon as it is in the batch instead of with the next present (which that thread may be the one to queue).
+// renotify: wake the render thread even when the serial was asked for already (wait_serial's backstop).
+void want_flush(uint64_t serial, bool renotify = false) {
+    if (!g->frame_batch || serial <= g->flushed_pub.load()) return;
+    uint64_t cur = g->flush_want_serial.load();
+    do {
+        if (cur >= serial) {
+            if (!renotify) return;   // asked for already (by whoever raised it, who notified)
+            break;
+        }
+    } while (!g->flush_want_serial.compare_exchange_weak(cur, serial));
+    // Notified under qmu, so a render thread between its predicate and its wait cannot miss it.
     std::lock_guard<std::mutex> lk(g->qmu);
     g->qcv.notify_one();
 }
@@ -464,6 +481,7 @@ bool on_render_thread() { return g && std::this_thread::get_id() == g->tid; }
 gfx::Device& device() { return *g->dev; }
 VkDevice vkdev() { return g->dev->device(); }
 Counters& counters() { return g->ctr; }
+bool counters_ready() { return g != nullptr; }
 Counters* counters_if() { return g ? &g->ctr : nullptr; }
 uint64_t completed_serial() { return g ? g->completed.load() : 0; }
 uint64_t poll_completed() { return g ? read_completed() : 0; }
@@ -686,6 +704,8 @@ uint64_t submit_on_render_thread(const std::function<void(Frame&)>& record, uint
             g_copy_done_cv.notify_all();
             read_completed();
         }
+        // submit_batch = frame: a thread already waits for this serial (it asked before it was recorded): it goes to the GPU now.
+        if (g->frame_batch && batch_flush_wanted()) flush_batch();
         g->ctr.submit_replay_ns.fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count()));
         return serial;
     }
@@ -739,7 +759,6 @@ void present_batch_done(const gfx::Renderer::SubmitPrefix& p) {
     }
     g->flushed = p.value;
     g->flushed_pub.store(p.value);
-    g->flush_wanted.store(false);
     g->batch.clear();
     g->ctr.submits.fetch_add(1);
 }
@@ -875,7 +894,26 @@ bool wait_serial(uint64_t serial, uint64_t timeout_ns) {
     wi.semaphoreCount = 1;
     wi.pSemaphores = &g->timeline;
     wi.pValues = &serial;
-    VkResult r = vkWaitSemaphores(g->dev->device(), &wi, timeout_ns);
+    VkResult r;
+    if (!g->frame_batch) {
+        r = vkWaitSemaphores(g->dev->device(), &wi, timeout_ns);
+    } else {
+        // submit_batch = frame: waited in slices, asking again for the flush between them, so a request the render thread missed
+        // costs 50 ms instead of the game.
+        constexpr uint64_t kSliceNs = 50'000'000;
+        const auto deadline = timeout_ns == UINT64_MAX ? std::chrono::steady_clock::time_point::max()
+                                                       : tw0 + std::chrono::nanoseconds(std::min<uint64_t>(timeout_ns, INT64_MAX / 2));
+        for (;;) {
+            uint64_t slice = kSliceNs;
+            if (timeout_ns != UINT64_MAX) {
+                const auto left = std::chrono::duration_cast<std::chrono::nanoseconds>(deadline - std::chrono::steady_clock::now()).count();
+                slice = left <= 0 ? 0 : std::min<uint64_t>(kSliceNs, static_cast<uint64_t>(left));
+            }
+            r = vkWaitSemaphores(g->dev->device(), &wi, slice);
+            if (r != VK_TIMEOUT || slice < kSliceNs) break;
+            want_flush(serial, true);
+        }
+    }
     if (r == VK_SUCCESS && !on_render_thread()) {
         std::unique_lock<std::mutex> lock(g_copy_done_mu);
         auto ready = [serial] { const auto copying = g_copy_inflight.load(); return !copying || copying > serial; };

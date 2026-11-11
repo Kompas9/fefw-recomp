@@ -8,10 +8,17 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <thread>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 #include "nxrt/config.h"
+#include "nxrt/diag.h"
 #include "nxrt/ftrace.h"
 #include "nxrt/gfx.h"
 #include "nxrt/log.h"
@@ -27,6 +34,48 @@
 namespace nxrt::gfx {
 namespace {
 constexpr const char* kTag = "gfx";
+
+// begin_frame's waits for the slot's fence and for a swapchain image: bounded, so a GPU or compositor that stops answering costs skipped
+// frames (and, after kStallRecreate in a row, a new swapchain) instead of a frozen window.
+constexpr uint64_t kFrameWaitNs = 1'000'000'000ull;
+constexpr uint32_t kStallRecreate = 3;
+
+// VK_ERROR_DEVICE_LOST: nothing on the device works any more (every wait on it would hang or fail). Logged once, a report goes to the
+// crash report file, and the process ends instead of sitting frozen on a black window.
+[[noreturn]] void device_lost(const char* where, VkResult r, uint64_t frames) {
+    static std::atomic<bool> once{false};
+    if (once.exchange(true)) {
+        for (;;) std::this_thread::sleep_for(std::chrono::seconds(1));   // another thread is writing the report and ending the process
+    }
+    char b[512];
+    std::snprintf(b, sizeof b,
+                  "GPU DEVICE LOST (reason: VK_ERROR_DEVICE_LOST)\n  %s returned %d after %llu presented frames: the graphics driver reset or removed the device\n"
+                  "  (a driver crash or timeout, an out-of-video-memory condition, or a GPU hang). The game was stopped.\n",
+                  where, static_cast<int>(r), static_cast<unsigned long long>(frames));
+    std::string text = b;
+    text += "\n";
+    text += diag_thread_dump();
+    for (size_t pos = 0; pos < text.size();) {
+        size_t eol = text.find('\n', pos);
+        if (eol == std::string::npos) eol = text.size();
+        NXLOG_E(kTag, "%.*s", static_cast<int>(eol - pos), text.data() + pos);
+        pos = eol + 1;
+    }
+    const std::string path = crash_report_path();
+    if (!path.empty()) {
+        if (std::FILE* f = std::fopen(path.c_str(), "wb")) {
+            std::fwrite(text.data(), 1, text.size(), f);
+            std::fclose(f);
+            NXLOG_E(kTag, "device lost report written to %s", path.c_str());
+        }
+    }
+    log_flush();
+    std::fflush(nullptr);
+#ifdef _WIN32
+    TerminateProcess(GetCurrentProcess(), 5);   // no DLL detach: driver threads on a lost device can hang it
+#endif
+    std::_Exit(5);
+}
 
 struct ImageState {   // a barrier helper description
     VkImageLayout layout;
@@ -177,6 +226,7 @@ struct Renderer::Impl {
     std::vector<Target> targets;
     bool dirty = true;
     int last_px_w = -1, last_px_h = -1;
+    uint32_t stalls = 0;    // begin_frame waits in a row that timed out (kFrameWaitNs)
 
     struct Slot {
         VkCommandPool pool = VK_NULL_HANDLE;
@@ -504,7 +554,8 @@ struct Renderer::Impl {
         VkResult r = vkCreateSwapchainKHR(vk(), &ci, nullptr, &fresh);
         if (r == VK_SUCCESS) vk_gauge_swapchains().add(1);
         destroy_targets();
-        if (old) {
+        if (old) {   // under the queue lock: the Reflex calls (lowlat.cpp) read the handle under it, from other threads
+            std::lock_guard<std::mutex> ql(dev->queue_mutex());
             if (latency) latency->swapchain_destroyed(old);
             vkDestroySwapchainKHR(vk(), old, nullptr);
             vk_gauge_swapchains().sub(1);
@@ -586,6 +637,29 @@ struct Renderer::Impl {
         return true;
     }
 
+    // A slot whose present submission (and its stand-in) failed: its fence was reset and will never be signalled, its acquire semaphore
+    // holds a signal nothing will wait for. Both are made again (the fence signalled), after the queue has gone idle.
+    void reset_slot_sync(Slot& s) {
+        dev->wait_idle();
+        if (s.acquire) { vkDestroySemaphore(vk(), s.acquire, nullptr); vk_gauge_semaphores().sub(1); s.acquire = VK_NULL_HANDLE; }
+        if (s.fence) { vkDestroyFence(vk(), s.fence, nullptr); vk_gauge_fences().sub(1); s.fence = VK_NULL_HANDLE; }
+        VkFenceCreateInfo fi = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        fi.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+        if (vkCreateFence(vk(), &fi, nullptr, &s.fence) == VK_SUCCESS) vk_gauge_fences().add(1);
+        else s.fence = VK_NULL_HANDLE;
+        if (!create_semaphore(&s.acquire)) s.acquire = VK_NULL_HANDLE;
+        s.ts_pending = false;
+        if (!s.fence || !s.acquire) NXLOG_E(kTag, "could not create the frame slot's sync objects again");
+    }
+
+    // begin_frame: a bounded wait (fence or image) timed out. The frame is skipped; several in a row rebuild the swapchain.
+    void stalled(const char* what) {
+        ++st.skipped;
+        if (++stalls == 1 || stalls % 10 == 0)
+            NXLOG_W(kTag, "%s not ready after %llu ms (%u in a row): frame skipped", what, static_cast<unsigned long long>(kFrameWaitNs / 1000000), stalls);
+        if (stalls % kStallRecreate == 0) dirty = true;
+    }
+
     void destroy_all() {
         dev->wait_idle();
         probe_stop_join();
@@ -602,7 +676,12 @@ struct Renderer::Impl {
         slots.clear();
         destroy_targets();
         extras::framegen_swapchain_reset();
-        if (swapchain) { vkDestroySwapchainKHR(vk(), swapchain, nullptr); vk_gauge_swapchains().sub(1); }
+        if (swapchain) {
+            std::lock_guard<std::mutex> ql(dev->queue_mutex());
+            if (latency) latency->swapchain_destroyed(swapchain);
+            vkDestroySwapchainKHR(vk(), swapchain, nullptr);
+            vk_gauge_swapchains().sub(1);
+        }
         swapchain = VK_NULL_HANDLE;
     }
 };
@@ -674,14 +753,34 @@ bool Renderer::begin_frame(FrameInfo* out) {
     if (s.kind != extras::OutputKind::Sdr8 && extras::hdr_state().metadata_serial != s.md_serial) s.apply_hdr_metadata();   // the game declared new levels
 
     Impl::Slot& slot = s.slots[s.cur_slot];
-    vkWaitForFences(s.vk(), 1, &slot.fence, VK_TRUE, UINT64_MAX);
+    if (!slot.fence || !slot.acquire) {   // a reset_slot_sync that could not make them again: try once more
+        s.reset_slot_sync(slot);
+        if (!slot.fence || !slot.acquire) {
+            s.st.skipped++;
+            return false;
+        }
+    }
+    {
+        const VkResult fr = vkWaitForFences(s.vk(), 1, &slot.fence, VK_TRUE, kFrameWaitNs);
+        if (fr == VK_TIMEOUT) {
+            s.stalled("the previous frame on this slot (GPU)");
+            return false;
+        }
+        if (fr == VK_ERROR_DEVICE_LOST) device_lost("vkWaitForFences (frame slot)", fr, s.st.frames);
+        if (fr != VK_SUCCESS) NXLOG_E(kTag, "vkWaitForFences failed (%d)", static_cast<int>(fr));
+    }
     s.read_timestamps(slot);
 
     uint32_t idx = 0;
     if (s.headless) {
         idx = static_cast<uint32_t>(s.frame_number % s.targets.size());
     } else {
-        VkResult r = vkAcquireNextImageKHR(s.vk(), s.swapchain, UINT64_MAX, slot.acquire, VK_NULL_HANDLE, &idx);
+        VkResult r = vkAcquireNextImageKHR(s.vk(), s.swapchain, kFrameWaitNs, slot.acquire, VK_NULL_HANDLE, &idx);
+        if (r == VK_TIMEOUT || r == VK_NOT_READY) {
+            s.stalled("a swapchain image");
+            return false;
+        }
+        if (r == VK_ERROR_DEVICE_LOST) device_lost("vkAcquireNextImageKHR", r, s.st.frames);
         if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_ERROR_SURFACE_LOST_KHR) {
             s.dirty = true;
             s.st.out_of_date++;
@@ -697,6 +796,7 @@ bool Renderer::begin_frame(FrameInfo* out) {
             return false;
         }
     }
+    s.stalls = 0;
     vkResetFences(s.vk(), 1, &slot.fence);
     vkResetCommandPool(s.vk(), slot.pool, 0);
     VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -808,13 +908,37 @@ void Renderer::end_frame(SubmitPrefix* prefix) {
             pr.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
         }
     }
+    bool present_ok = true;
     {
         std::lock_guard<std::mutex> lk(s.dev->queue_mutex());
         VkResult r = vkQueueSubmit2(s.dev->queue(), 1, &si, slot.fence);
-        if (r != VK_SUCCESS) NXLOG_E(kTag, "vkQueueSubmit2 failed (%d)", static_cast<int>(r));
-        else if (probe_value) s.probe_published.store(probe_value);
+        if (r != VK_SUCCESS) {
+            NXLOG_E(kTag, "vkQueueSubmit2 failed (%d)", static_cast<int>(r));
+            if (r == VK_ERROR_DEVICE_LOST) device_lost("vkQueueSubmit2 (present)", r, s.st.frames);
+            // The fence was reset in begin_frame and the present below waits for render_done: an empty submission stands in (it waits
+            // for the acquire and signals both), so neither the next begin_frame nor the present hangs on something never signalled.
+            VkSubmitInfo2 stand = {VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
+            if (!s.headless) {
+                stand.waitSemaphoreInfoCount = 1;
+                stand.pWaitSemaphoreInfos = &wait;
+                stand.signalSemaphoreInfoCount = 1;
+                stand.pSignalSemaphoreInfos = &signal;
+            }
+            const VkResult r2 = vkQueueSubmit2(s.dev->queue(), 1, &stand, slot.fence);
+            if (r2 == VK_ERROR_DEVICE_LOST) device_lost("vkQueueSubmit2 (present stand-in)", r2, s.st.frames);
+            if (r2 != VK_SUCCESS) {
+                NXLOG_E(kTag, "the stand-in submission failed too (%d): the frame is not presented, the slot's sync objects are made again",
+                        static_cast<int>(r2));
+                present_ok = false;
+            }
+        } else if (probe_value) {
+            s.probe_published.store(probe_value);
+        }
         if (prefix) prefix->submitted = r == VK_SUCCESS;
-        if (!s.headless) {
+        if (!present_ok) {
+            s.dirty = true;     // the acquired image is never presented: a new swapchain gives it back
+            s.st.skipped++;
+        } else if (!s.headless) {
             VkPresentInfoKHR pi = {VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
             pi.waitSemaphoreCount = 1;
             pi.pWaitSemaphores = &t.render_done;
@@ -832,11 +956,14 @@ void Renderer::end_frame(SubmitPrefix* prefix) {
             if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR || r == VK_ERROR_SURFACE_LOST_KHR) {
                 s.dirty = true;
                 s.st.out_of_date++;
+            } else if (r == VK_ERROR_DEVICE_LOST) {
+                device_lost("vkQueuePresentKHR", r, s.st.frames);
             } else if (r != VK_SUCCESS) {
                 NXLOG_E(kTag, "vkQueuePresentKHR failed (%d)", static_cast<int>(r));
             }
         }
     }
+    if (!present_ok) s.reset_slot_sync(slot);   // outside the queue lock: it waits for the queue to go idle
     if (!s.headless && s.latency) s.latency->present_end();
     s.st.frames++;
     s.frame_number++;

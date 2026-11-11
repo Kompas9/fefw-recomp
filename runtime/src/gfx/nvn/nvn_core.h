@@ -122,6 +122,13 @@ struct PoolHit {
     MemoryPool* pool = nullptr;
     uint64_t offset = 0;
 };
+struct Texture;
+// Lifetime gauges (nvn_objects.cpp): a pool retired by the game (retire_pool) or a texture it finalized counts until its host object is
+// destroyed. Each object is counted once: pools are retired once (dead), textures finalized once (destroyed).
+void lifetime_pool_retired(const MemoryPool* p);
+void lifetime_pool_freed(const MemoryPool* p);
+void lifetime_texture_finalized();
+void lifetime_texture_freed(const Texture* t);
 void pool_register(MemoryPool* p);
 void pool_unregister(MemoryPool* p);
 PoolHit pool_lookup(uint64_t gpu_address);          // pool is null when the address is in no pool

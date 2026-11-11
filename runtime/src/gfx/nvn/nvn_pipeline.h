@@ -41,7 +41,14 @@ struct ProgLayout {
     bool has_set[5] = {};
     VkShaderStageFlags push_stages = 0;         // push constant range [0, push_bytes) of generated stages (ShaderInfo::push_bytes); 0 = none
     uint32_t push_bytes = 0;
+    // Set 0 (the uniform buffers) is a push descriptor set ([nvn] push_uniforms): the replay pushes its buffers with each draw that changes
+    // them (vkCmdPushDescriptorSetKHR) instead of finding or making a descriptor set for them. Every binding of it is a buffer.
+    bool push_set0 = false;
 };
+
+// [nvn] push_uniforms (default true): programs whose set 0 fits the device's push descriptor limit push it (ProgLayout::push_set0). False when the
+// device has no VK_KHR_push_descriptor.
+bool push_uniforms_on();
 
 // Stages by NVN stage index (0 vertex, 1 fragment, 2 geometry, 5 compute); null = absent.
 const ProgLayout* prog_layout(const ShaderInfo* const stages[6]);

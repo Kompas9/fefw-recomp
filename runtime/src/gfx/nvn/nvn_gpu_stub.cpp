@@ -8,8 +8,8 @@
 
 namespace nxrt::nvn::be {
 // Destructors of host objects that own GPU resources (defined here so tests link without Vulkan).
-Texture::~Texture() {}
-MemoryPool::~MemoryPool() {}
+Texture::~Texture() { lifetime_texture_freed(this); }
+MemoryPool::~MemoryPool() { lifetime_pool_freed(this); }
 }  // namespace nxrt::nvn::be
 
 namespace nxrt::nvn::be::gpu {
