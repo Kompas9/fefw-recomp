@@ -46,6 +46,9 @@ public:
     virtual const char* name() const = 0;
     // Records the upscale into cb (outside any render pass). False: nothing recorded (the caller falls back to the game's own picture).
     virtual bool evaluate(VkCommandBuffer cb, const TemporalFrame& f) = 0;
+    // Why the last evaluate() failed, in the SDK's own words ("slEvaluateFeature failed (39)"), or "" when it has not. The F1 page shows it
+    // beside the fallback it caused, so a player reads the real cause instead of a guess about missing DLLs.
+    virtual const char* last_failure() const { return ""; }
 };
 
 // ---- what the replay calls (nvn_replay.cpp) --------------------------------------------------------------------------------------

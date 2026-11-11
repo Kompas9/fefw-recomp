@@ -256,11 +256,16 @@ private:
     static constexpr float kIdentity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
     bool fail(const char* what, int code = -1) {
         NXLOG_E(kTag, "%s failed (%d): DLSS off", what, code);
+        // The F1 page shows this beside the fallback: Streamline's own wording, not a guess about the DLLs.
+        if (code >= 0) std::snprintf(failure_, sizeof(failure_), "%s failed (%d): DLSS off", what, code);
+        else std::snprintf(failure_, sizeof(failure_), "%s failed: DLSS off", what);
         failed_ = true;
         return false;
     }
+    const char* last_failure() const override { return failure_; }
     gfx::Device* dev_;
     bool dlaa_ = false, failed_ = false;
+    char failure_[96] = {};
     sl::DLSSMode last_mode_ = sl::DLSSMode::eCount;
     VkExtent2D last_out_ = {};
     Range range_;

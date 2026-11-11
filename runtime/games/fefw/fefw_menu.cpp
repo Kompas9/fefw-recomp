@@ -48,6 +48,7 @@
 #include "nxrt/menu_i18n.h"
 #include "nxrt/haptic.h"
 #include "nxrt/platform.h"
+#include "nxrt/render_status.h"
 #include "play_types.h"
 #include "play_ui.h"
 
@@ -720,9 +721,81 @@ void picture_group(UiHost& host, Menu& m) {
     }
 }
 
+// The tier a running render scale reads as, named the way the ratio list names it. The percent comes from the pass's own extents, so a
+// hand-written render_ratio (0.7) or a resolution the game picked itself shows its nearest tier beside the exact percent.
+const char* live_tier_name(int percent) {
+    if (percent <= 0) return "unknown";
+    if (percent >= 99) return "native (DLAA)";
+    if (percent >= 67) return "quality";
+    if (percent >= 59) return "balanced";
+    if (percent >= 50) return "performance";
+    if (percent >= 33) return "ultra performance";
+    return "below ultra performance";
+}
+
+// Graphics > Live render state (render_status.h): what ran, at which sizes, and whether frame generation really inserts frames. Read only:
+// no row writes anything, and the snapshot is a plain copy taken here (the render thread publishes at most four times a second).
+void live_status_group() {
+    const render_status::Snapshot s = render_status::snapshot();
+    // The same numbers in the log, once a second, while the page is open: what the rows say can be checked against the render thread's own
+    // lines (nvn.dlss: network 2: first evaluation ...) without a screenshot.
+    if (nxrt::log_enabled(nxrt::LogLevel::Debug)) {
+        static uint64_t last = 0;
+        const uint64_t now = FrameLimiter::now_ns();
+        if (!last || now - last >= 1000000000ull) {
+            last = now;
+            NXLOG_D(kTag,
+                    "live render state: seen %d, upscaler %s -> %s (fallback %d)%s%s, render %dx%d -> %dx%d (%d%%), screen %dx%d, "
+                    "frame generation %s (dlss %d, fsr3 %d), pause %s, status %u, %u game frames, %u shown, %u generated (%.1f -> %.1f fps), measured %d",
+                    s.seen ? 1 : 0, render_status::backend_name(s.configured), render_status::backend_name(s.actual), s.fallback ? 1 : 0,
+                    s.reason[0] ? ", reason: " : "", s.reason, s.render_w, s.render_h, s.output_w, s.output_h, s.percent, s.screen_w, s.screen_h,
+                    render_status::framegen_name(s.fg), s.fg_dlss ? 1 : 0, s.fg_ffx ? 1 : 0, render_status::pause_name(s.pause), s.status,
+                    s.game_frames, s.shown_frames, s.generated, s.game_fps, s.shown_fps, s.measured ? 1 : 0);
+        }
+    }
+    section("Live render state");
+    if (!s.seen && s.fg == render_status::FrameGen::Unknown) {
+        ImGui::TextDisabled("%s", tr("Nothing has been rendered yet."));
+        return;
+    }
+    if (s.seen) {
+        // The backend that really ran, and the one the configuration asked for when they differ.
+        if (s.fallback)
+            ImGui::Text(tr("Upscaler: %s -> %s (fell back)"), tr(render_status::backend_name(s.configured)),
+                        tr(render_status::backend_name(s.actual)));
+        else
+            ImGui::Text(tr("Upscaler: %s (%s)"), tr(render_status::backend_name(s.actual)),
+                        s.configured == render_status::Backend::Auto ? tr("chosen by Auto") : tr("as configured"));
+        if (s.fallback && s.reason[0]) ImGui::TextWrapped("%s", s.reason);
+        // The pass's own extents: the input it upscaled and the output it wrote.
+        if (s.output_w > 0)
+            ImGui::Text(tr("Render %d x %d -> %d x %d (%d%%, %s)"), s.render_w, s.render_h, s.output_w, s.output_h, s.percent,
+                        tr(live_tier_name(s.percent)));
+        if (s.screen_w > 0 && (s.screen_w != s.output_w || s.screen_h != s.output_h))
+            ImGui::Text(tr("Screen %d x %d"), s.screen_w, s.screen_h);
+    }
+    // Frame generation: the backend, its lifecycle, and the presents it counted in the last window.
+    const char* backend = s.fg_dlss ? "DLSS Frame Generation" : s.fg_ffx ? "FSR 3 frame generation" : tr("none");
+    ImGui::Text(tr("Frame generation: %s (%s)"), tr(render_status::framegen_name(s.fg)), backend);
+    if (s.fg == render_status::FrameGen::Paused && s.pause != render_status::Pause::None)
+        ImGui::TextWrapped(tr("Why it is paused: %s"), tr(render_status::pause_name(s.pause)));
+    if (s.measured && s.game_frames > 0) {
+        // Three separate numbers, because the backend's own count covers every present: the game's frames, what reached the display, and
+        // the extra frames the difference proves.
+        ImGui::Text(tr("Last window: %u game frames, %u frames shown, %u generated (%.1f -> %.1f fps)"), s.game_frames, s.shown_frames, s.generated,
+                    s.game_fps, s.shown_fps);
+        if (s.fg == render_status::FrameGen::Generating && s.generated == 0)
+            ImGui::TextColored(kOrange, "%s", tr("Set up, but no extra frame was presented in the last window: not confirmed to be inserting frames."));
+    } else if (s.fg == render_status::FrameGen::Ready) {
+        ImGui::TextColored(kOrange, "%s", tr("Set up, actual frame insertion not confirmed yet."));
+    }
+    if (s.fg_dlss && s.status) ImGui::TextDisabled(tr("Streamline status %u"), s.status);
+}
+
 void graphics_page(UiHost& host, Menu& m) {
     resolution_group(m);
     upscaler_group(m);
+    live_status_group();
     hdr_group(host, m);
     picture_group(host, m);
 }

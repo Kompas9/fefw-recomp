@@ -18,6 +18,8 @@
 #include "nxrt/frame_limiter.h"
 #include "nxrt/gfx.h"
 #include "nxrt/log.h"
+#include "nxrt/platform.h"
+#include "nxrt/render_status.h"
 
 #include "../../../third_party/nvidia_streamline/include/sl.h"
 #include "../../../third_party/nvidia_streamline/include/sl_consts.h"
@@ -92,6 +94,16 @@ struct State {
     VkImage ffx_hudless = VK_NULL_HANDLE;
     uint64_t last_present_ns = 0, ffx_count0 = 0;
     bool vsync_paused = false, pace_told = false;   // framegen_pace
+    bool small_bb = false;                          // the backbuffer was under the minimum on the last present
+    render_status::Pause pause_reason = render_status::Pause::None;   // why the last present could not generate
+    // The last closed report window, for the F1 page (render_status.h). win_shown is every frame the backend presented, the game's own
+    // ones included (numFramesActuallyPresented, or the FSR 3 swapchain count), so it is not a generated-frame count: the page subtracts
+    // win_game. A window in which the backend presented no more frames than the game itself made proves nothing: the page says "set up",
+    // not "generating".
+    uint32_t win_shown = 0, win_game = 0;
+    double win_game_fps = 0, win_shown_fps = 0;
+    bool win_measured = false;
+    uint64_t status_ns = 0;                         // the last publish_status (250 ms throttle)
 };
 State& st() {
     static State s;
@@ -190,6 +202,55 @@ bool fg_init(State& s, gfx::Device* dev) {
     s.min_dimension = gs.minWidthOrHeight;
     s.fg = true;
     return true;
+}
+
+// The F1 page's copy of what frame generation is doing (render_status.h). Only what this module can prove: the setting, the backend's own
+// lifecycle, and the presents it counted. "Generating" needs generated frames in a closed window, never a loaded DLL or an option set.
+void publish_status(State& s) {
+    using render_status::FrameGen;
+    FrameGen fg = FrameGen::Unknown;
+    bool dlss = false, ffx = false;
+    const int mode = fg_setting();
+    // Read here as well as in the present path: a game in the background stops presenting, so the present-time value would stay frozen at
+    // whatever it was when the window still had the focus. The focus is also cleared here, so a stale Unfocused cannot outlive the alt-tab.
+    render_status::Pause pause = s.pause_reason;
+    if (!platform::focused()) {
+        if (pause == render_status::Pause::None) pause = render_status::Pause::Unfocused;
+    } else if (pause == render_status::Pause::Unfocused) {
+        pause = render_status::Pause::None;
+    }
+    if (mode == 0) {
+        fg = FrameGen::Off;
+    } else if (mode == 3) {
+        ffx = true;
+        if (!ffx_fg_files()) fg = FrameGen::Missing;
+        else if (!ffx_fg_wanted()) fg = FrameGen::Missing;
+        else if (s.win_measured && s.win_game > 0 && s.win_shown > s.win_game) fg = FrameGen::Generating;
+        else if (s.on) fg = s.win_measured ? FrameGen::Ready : FrameGen::Waiting;
+        else fg = s.win_measured ? FrameGen::Ready : FrameGen::Waiting;
+    } else {
+        dlss = true;
+        if (!streamline_framegen_available() || !streamline_framegen_files()) fg = FrameGen::Missing;
+        else if (!temporal_dlss_started()) fg = FrameGen::Missing;
+        else if (s.fg_tried && !s.fg) fg = FrameGen::Failed;
+        else if (!s.fg) fg = FrameGen::Waiting;
+        else if (s.win_measured && s.win_game > 0 && s.win_shown > s.win_game) fg = FrameGen::Generating;
+        else fg = FrameGen::Ready;
+        if (fg == FrameGen::Generating && pause != render_status::Pause::None) fg = FrameGen::Paused;
+        // A backend that is set up and would run, held back by the window: this is the pause a player sees by alt-tabbing. Missing and
+        // failed are not pauses and keep their own wording.
+        if ((fg == FrameGen::Ready || fg == FrameGen::Waiting) && pause != render_status::Pause::None) fg = FrameGen::Paused;
+    }
+    render_status::set_framegen(fg, dlss, ffx, fg == FrameGen::Paused || fg == FrameGen::Generating ? pause : render_status::Pause::None, s.status,
+                                s.win_shown, s.win_game, s.win_game_fps, s.win_shown_fps);
+    s.status_ns = FrameLimiter::now_ns();
+}
+
+// The page reads a snapshot; four publishes a second are plenty and keep the present path free of string work.
+void publish_status_throttled(State& s) {
+    const uint64_t now = FrameLimiter::now_ns();
+    if (s.status_ns && now - s.status_ns < 250000000ull) return;
+    publish_status(s);
 }
 
 bool ensure(State& s, gfx::Image& img, VkExtent2D e, VkFormat fmt, const char* name) {
@@ -311,6 +372,12 @@ void report(State& s) {
     NXLOG_I(kTag, "%.1f game fps, %.1f shown fps, generation on %u of %u frames, status %u, last API error %d, Reflex sim start -> GPU end %.2f ms, GPU frame %.2f ms (%d frames)",
             s.n_game / sec, s.n_shown / sec, s.n_on, s.n_game, s.status, g_api_error.load(), n ? lat / n * 1e-3 : 0.0, n ? gpu / n * 1e-3 : 0.0, n);
     set_shown_ratio(s.n_game, s.n_shown, s.n_on);
+    s.win_shown = s.n_shown;
+    s.win_game = s.n_game;
+    s.win_game_fps = s.n_game / sec;
+    s.win_shown_fps = s.n_shown / sec;
+    s.win_measured = s.n_game > 0;
+    publish_status(s);
     if (s.n_extra_inputs || s.n_extra_sr)
         NXLOG_W(kTag, "%u frames had more than one DLSS evaluation (frame generation used the first one's inputs; DLSS SR moved to a new frame index %u times)",
                 s.n_extra_inputs, s.n_extra_sr);
@@ -522,8 +589,15 @@ void framegen_present_begin(VkCommandBuffer cb, VkExtent2D backbuffer, VkExtent2
     if (s.fg) {
         int32_t rect[4];
         picture_rect(backbuffer, src, crop, keep_aspect, rect);
-        const bool want = s.inputs && !again && fg_setting() == 1 && !s.vsync_paused &&
-                          backbuffer.width >= s.min_dimension && backbuffer.height >= s.min_dimension;
+        const bool small = backbuffer.width < s.min_dimension || backbuffer.height < s.min_dimension;
+        const bool want = s.inputs && !again && fg_setting() == 1 && !s.vsync_paused && !small;
+        // Reporting only: a game in the background stops presenting new frames, and the page says which of the two it was.
+        const bool unfocused = !platform::focused();
+        s.pause_reason = want ? render_status::Pause::None
+                              : s.vsync_paused ? render_status::Pause::Vsync
+                              : small ? render_status::Pause::SmallBackbuffer
+                              : unfocused ? render_status::Pause::Unfocused
+                              : render_status::Pause::NoInputs;
         s.streak = want ? s.streak + 1 : 0;
         const bool on = want && s.streak >= 2;
         const bool moved = backbuffer.width != s.bb.width || backbuffer.height != s.bb.height || !std::equal(rect, rect + 4, s.rect);
@@ -550,6 +624,7 @@ void framegen_present_end() {
     if (fg_setting() == 3) {
         if (!ffx_fg_wanted()) {
             clear_shown_ratio();
+            publish_status_throttled(s);
             return;
         }
         ++s.n_game;
@@ -565,6 +640,12 @@ void framegen_present_end() {
                     static_cast<double>(c - s.ffx_count0) / sec, s.n_on, s.n_game,
                     s.n_extra_inputs ? ", some frames had more than one DLSS evaluation" : "");
             set_shown_ratio(s.n_game, static_cast<double>(c - s.ffx_count0), s.n_on);
+            s.win_shown = static_cast<uint32_t>(c - s.ffx_count0);
+            s.win_game = s.n_game;
+            s.win_game_fps = s.n_game / sec;
+            s.win_shown_fps = static_cast<double>(c - s.ffx_count0) / sec;
+            s.win_measured = s.n_game > 0;
+            publish_status(s);
             s.t0 = now;
             s.ffx_count0 = c;
             s.n_game = s.n_on = s.n_extra_inputs = 0;
@@ -572,9 +653,13 @@ void framegen_present_end() {
     } else {
         if (!temporal_dlss_started() || !base_init()) {
             clear_shown_ratio();
+            publish_status_throttled(s);
             return;
         }
-        if (!s.fg) clear_shown_ratio();   // DLSS-G not running or stopped (slDLSSGSetOptions failed): no more reports
+        if (!s.fg) {   // DLSS-G not running or stopped (slDLSSGSetOptions failed): no more reports
+            clear_shown_ratio();
+            publish_status_throttled(s);
+        }
     }
     if (s.markers) marker(s, sl::PCLMarker::ePresentEnd);
     if (s.fg) {
@@ -588,6 +673,7 @@ void framegen_present_end() {
         ++s.n_game;
         s.n_shown += shown;
         report(s);
+        publish_status_throttled(s);
     }
     for (size_t i = 0; i < s.retired.size();) {
         if (s.index - s.retired[i].first > 8) {
