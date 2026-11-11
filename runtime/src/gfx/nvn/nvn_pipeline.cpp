@@ -265,7 +265,31 @@ VkShaderModule shader_module(const ShaderInfo* s) {
     std::lock_guard<std::recursive_mutex> lk(g_module_mu);
     auto it = g_modules.find(s);
     if (it != g_modules.end()) return it->second;
-    VkShaderModule m = create_module(s->spirv, s->hash.c_str());
+    // Local FEFW workaround. Apply at module creation so both prewarm stubs and
+    // live shaders use the same program; normal loading, DLSS and GPL remain enabled.
+    std::vector<uint32_t> fixed;
+    const std::vector<uint32_t>* words = &s->spirv;
+    if (s->hash == "7800ed7c8baf5583" && config_get_bool("nvn", "fefw_point_shadow_workaround", true)) {
+        uint32_t zero = 0;
+        size_t target = 0;
+        for (size_t i = 5; i < s->spirv.size();) {
+            const uint32_t n = s->spirv[i] >> 16, op = s->spirv[i] & 0xffff;
+            if (!n || i + n > s->spirv.size()) break;
+            if (op == 43 && n == 4 && s->spirv[i + 1] == 4 && s->spirv[i + 3] == 0) zero = s->spirv[i + 2];
+            if (op == 129 && n == 5 && s->spirv[i + 1] == 4 && s->spirv[i + 2] == 10404 &&
+                s->spirv[i + 3] == 10403 && s->spirv[i + 4] == 2546) target = i;
+            i += n;
+        }
+        if (zero && target) {
+            fixed = s->spirv;
+            fixed[target + 3] = zero;  // visibility = 1 - occlusion -> 1; radial falloff unchanged
+            words = &fixed;
+            NXLOG_I(kTag, "FEFW point-shadow workaround applied to shader %s (prewarm/live module)", s->hash.c_str());
+        } else {
+            NXLOG_W(kTag, "FEFW point-shadow workaround: unexpected shader revision; original shader retained");
+        }
+    }
+    VkShaderModule m = create_module(*words, s->hash.c_str());
     g_modules[s] = m;
     return m;
 }
