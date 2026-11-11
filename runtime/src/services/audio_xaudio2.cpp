@@ -317,6 +317,11 @@ void XAudio2Sink::close_device() {
 }
 
 void XAudio2Sink::teardown() {
+    if (source_) {   // open_device failing after CreateSourceVoice: the voice would outlive its engine and be used by submit/stats
+        std::lock_guard<std::mutex> vl(voice_mu_);
+        source_->DestroyVoice();
+        source_ = nullptr;
+    }
     if (master_) {
         master_->DestroyVoice();
         master_ = nullptr;

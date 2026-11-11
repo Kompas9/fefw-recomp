@@ -411,3 +411,37 @@ NXTEST(guarded_pages_boundaries_and_mapping_changes) {
     }
     teardown(a);
 }
+
+// ImportFreeze (issue 97): while a range is frozen for a Vulkan import, a CPU write to it waits and lands after the freeze (the driver
+// rewrites each imported page and would have lost it); pages the tracker armed stay armed, and arm() leaves the range alone meanwhile.
+NXTEST(import_freeze_holds_writes_until_it_ends) {
+    ww::Region* r = setup();
+    REQUIRE(r != nullptr);
+    CHECK(ww::arm(r, 6, 1));                                   // an armed page inside the frozen range
+    std::atomic<bool> wrote{false};
+    std::thread writer;
+    {
+        const ww::ImportFreeze fz(reinterpret_cast<void*>(mem::kHeapBase + 4 * kPg), 4 * kPg);
+        CHECK_EQ(prot_of(mem::kHeapBase + 4 * kPg), static_cast<DWORD>(PAGE_READONLY));
+        CHECK_EQ(prot_of(mem::kHeapBase + 8 * kPg), static_cast<DWORD>(PAGE_READWRITE));   // outside the range
+        CHECK(!ww::arm(r, 5, 1));                              // no arming while frozen
+        writer = std::thread([&] {
+            *reinterpret_cast<volatile uint8_t*>(mem::kHeapBase + 5 * kPg) = 0x5a;
+            *reinterpret_cast<volatile uint8_t*>(mem::kHeapBase + 6 * kPg) = 0x6b;
+            wrote.store(true);
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        CHECK(!wrote.load());                                  // still waiting for the freeze
+        CHECK_EQ(*reinterpret_cast<volatile uint8_t*>(mem::kHeapBase + 5 * kPg), 0u);   // reads go on
+    }
+    writer.join();
+    CHECK(wrote.load());
+    CHECK_EQ(*reinterpret_cast<volatile uint8_t*>(mem::kHeapBase + 5 * kPg), 0x5au);
+    CHECK_EQ(*reinterpret_cast<volatile uint8_t*>(mem::kHeapBase + 6 * kPg), 0x6bu);
+    CHECK_EQ(prot_of(mem::kHeapBase + 4 * kPg), static_cast<DWORD>(PAGE_READWRITE));
+    std::vector<uint64_t> w;
+    ww::take_written(r, w);
+    CHECK(std::find(w.begin(), w.end(), 6u) != w.end());      // the armed page's write was tracked as usual
+    CHECK(ww::arm(r, 5, 1));                                   // the freeze ended
+    teardown(r);
+}

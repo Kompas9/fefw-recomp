@@ -47,7 +47,7 @@ uint32_t g_exit_code = 4;
 void (*g_on_report)(const char*, void*) = nullptr;
 void* g_user = nullptr;
 
-std::atomic<bool> g_in_handler{false};          // set while the handler runs: a second exception terminates
+std::atomic<DWORD> g_handler_tid{0};           // the thread whose report is being written; 0 = none
 std::atomic<bool> g_overflow_reported{false};   // the vectored handler already reported this stack overflow
 std::atomic<uint32_t> g_reports{0};
 
@@ -274,18 +274,33 @@ void emit(const std::string& text) {
     for (;;) Sleep(1000);
 }
 
+// Takes the handler for this thread. The same thread faulting again inside it terminates; another thread faulting at the same time
+// (a bad object shared by two guest threads often makes both fault together) waits, so the first report is finished and written
+// instead of the process ending with an empty one. The owner terminates the process, or (tests) releases the handler to the waiter.
+void enter_handler() {
+    const DWORD me = GetCurrentThreadId();
+    for (;;) {
+        DWORD owner = 0;
+        if (g_handler_tid.compare_exchange_strong(owner, me)) return;
+        if (owner == me) second_exception();
+        Sleep(50);
+    }
+}
+
+void leave_handler() { g_handler_tid = 0; }
+
 LONG WINAPI crash_filter(EXCEPTION_POINTERS* ep) {
     if (ep && ep->ExceptionRecord && ep->ExceptionRecord->ExceptionCode == EXCEPTION_STACK_OVERFLOW &&
         g_overflow_reported.exchange(false))
         return EXCEPTION_CONTINUE_SEARCH;  // the vectored handler already wrote this report
-    if (g_in_handler.exchange(true)) second_exception();
+    enter_handler();
     if (!ep || !ep->ExceptionRecord || !ep->ContextRecord) {
-        g_in_handler = false;
+        leave_handler();
         return EXCEPTION_CONTINUE_SEARCH;
     }
     emit(build_report(ep->ExceptionRecord, ep->ContextRecord, GetCurrentThreadId()));
     if (g_terminate) TerminateProcess(GetCurrentProcess(), g_exit_code);
-    g_in_handler = false;
+    leave_handler();
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
@@ -298,7 +313,7 @@ DWORD WINAPI overflow_thread(LPVOID) {
 LONG WINAPI crash_vectored(EXCEPTION_POINTERS* ep) {
     if (!ep || !ep->ExceptionRecord || !ep->ContextRecord) return EXCEPTION_CONTINUE_SEARCH;
     if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_STACK_OVERFLOW) return EXCEPTION_CONTINUE_SEARCH;
-    if (g_in_handler.exchange(true)) second_exception();
+    enter_handler();
     g_ov_rec = *ep->ExceptionRecord;
     g_ov_ctx = *ep->ContextRecord;
     g_ov_tid = GetCurrentThreadId();
@@ -308,7 +323,7 @@ LONG WINAPI crash_vectored(EXCEPTION_POINTERS* ep) {
         CloseHandle(th);
         g_overflow_reported = true;
     }
-    g_in_handler = false;
+    leave_handler();
     return EXCEPTION_CONTINUE_SEARCH;
 }
 

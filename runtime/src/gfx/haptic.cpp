@@ -663,25 +663,6 @@ bool is_pro(const uint16_t vendor, const uint16_t product) {
 
 }  // namespace
 
-const char* mode_name(Mode m) {
-    switch (m) {
-        case Mode::Off: return "off";
-        case Mode::Rumble: return "rumble";
-        case Mode::DualSense: return "dualsense";
-        default: return "auto";
-    }
-}
-
-bool mode_from_name(const char* s, Mode* out) {
-    if (!s || !out) return false;
-    if (!std::strcmp(s, "auto")) *out = Mode::Auto;
-    else if (!std::strcmp(s, "off") || !std::strcmp(s, "none")) *out = Mode::Off;
-    else if (!std::strcmp(s, "rumble") || !std::strcmp(s, "standard")) *out = Mode::Rumble;
-    else if (!std::strcmp(s, "dualsense") || !std::strcmp(s, "haptics")) *out = Mode::DualSense;
-    else return false;
-    return true;
-}
-
 const char* backend_name(Backend b) {
     switch (b) {
         case Backend::Rumble: return "standard rumble";

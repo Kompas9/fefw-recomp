@@ -146,7 +146,10 @@ std::string frame_name(uint64_t addr, std::unordered_map<uint64_t, std::string>&
         }
     } else if (si.module != "?" && !si.module.empty()) {
         char b[32];
-        std::snprintf(b, sizeof b, "!+0x%llx", static_cast<unsigned long long>(si.offset & ~0xfffull));   // 4 KiB buckets: no symbols for other modules
+        // 4 KiB buckets: no symbols for other modules. [prof] sample_exact = true writes the exact offset (to resolve against that
+        // module's own linker map afterwards, e.g. fefw_rt.dll's).
+        static const bool exact = config_get_bool("prof", "sample_exact", false);
+        std::snprintf(b, sizeof b, "!+0x%llx", static_cast<unsigned long long>(exact ? si.offset : si.offset & ~0xfffull));
         n = si.module + b;
     } else n = "unknown";
     for (char& c : n)

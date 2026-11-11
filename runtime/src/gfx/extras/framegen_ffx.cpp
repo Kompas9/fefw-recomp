@@ -108,13 +108,38 @@ bool load() {
     return true;
 }
 
-void destroy_contexts() {
-    Ffx& f = g();
+ffxReturnCode_t fg_dispatch(ffxDispatchDescFrameGeneration* params, void* ctx);   // below
+// Teardown order (AMD's samples): frame generation switched off on the swapchain first (it stops calling into the context and drops the
+// HUD-less image it holds), then the FFX swapchain, then the frame generation context. A context destroyed while the swapchain still
+// generates with it leaves the swapchain's present thread calling into freed state.
+void disable_fg(Ffx& f) {
+    if (!f.fg_ctx || !f.sc) return;
+    ffxConfigureDescFrameGeneration c = {};
+    c.header.type = FFX_API_CONFIGURE_DESC_TYPE_FRAMEGENERATION;
+    c.swapChain = reinterpret_cast<void*>(f.sc);
+    c.frameGenerationCallback = &fg_dispatch;
+    c.frameGenerationCallbackUserContext = &f.fg_ctx;
+    c.presentCallback = nullptr;
+    c.frameGenerationEnabled = false;
+    c.allowAsyncWorkloads = false;
+    c.HUDLessColor = FfxApiResource{};
+    c.frameID = f.frame_id;
+    const ffxReturnCode_t r = f.configure(&f.fg_ctx, &c.header);
+    if (r != FFX_API_RETURN_OK) NXLOG_W(kTag, "FSR 3 frame generation: switching it off before the teardown failed (%u)", r);
+}
+
+void destroy_fg_context(Ffx& f) {
     if (f.fg_ctx) f.destroy(&f.fg_ctx, nullptr);
     f.fg_ctx = nullptr;
+}
+
+void destroy_contexts() {
+    Ffx& f = g();
+    disable_fg(f);
     if (f.sc_ctx) f.destroy(&f.sc_ctx, nullptr);   // destroys its swapchain
     f.sc_ctx = nullptr;
     f.fns = {};
+    destroy_fg_context(f);
 }
 
 // The swapchain's frame pacing ([dlss] frame_gen_pacing). AMD's default paces to the recent average frame time less a 0.1 ms margin and,
@@ -152,9 +177,9 @@ VKAPI_ATTR VkResult VKAPI_CALL hook_create(VkDevice d, const VkSwapchainCreateIn
     if (f.sc_ctx && f.fns.pOutCreateSwapchainFFXAPI && f.fns.pOutDestroySwapchainFFXAPI) {
         // recreated (the renderer has idled the device): FFX's own destroy, then create; its context stays. The renderer's later destroy of
         // the old handle is skipped (the new object may even reuse its address).
-        if (f.fg_ctx) f.destroy(&f.fg_ctx, nullptr);
-        f.fg_ctx = nullptr;
+        disable_fg(f);
         if (f.sc) f.fns.pOutDestroySwapchainFFXAPI(d, f.sc, a, f.sc_ctx);
+        destroy_fg_context(f);      // after the swapchain that used it (ensure_fg_context makes a new one for the new size)
         f.dead = f.sc;
         f.sc = VK_NULL_HANDLE;
         VkSwapchainCreateInfoKHR c2 = *ci;
@@ -421,8 +446,8 @@ bool ensure_fg_context(const FfxFgFrame& fr) {
     const bool fits = f.fg_ctx && f.fg_display.width == fr.bb.width && f.fg_display.height == fr.bb.height && fr.render.width <= f.fg_max.width &&
                       fr.render.height <= f.fg_max.height && f.fg_inverted == fr.depth_inverted;
     if (fits) return true;
-    if (f.fg_ctx) f.destroy(&f.fg_ctx, nullptr);
-    f.fg_ctx = nullptr;
+    disable_fg(f);              // the swapchain stays: it must stop generating with the context before it goes
+    destroy_fg_context(f);
     ffxCreateBackendVKDesc be = {};
     be.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK;
     be.vkDevice = f.dev->device();

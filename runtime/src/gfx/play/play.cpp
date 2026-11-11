@@ -679,10 +679,17 @@ void poll_pads(uint64_t now) {
     {
         const float l = std::max(st.vib[0][0].load(), st.vib[1][0].load()), h = std::max(st.vib[0][1].load(), st.vib[1][1].load());
         map_rumble(l, h, st.settings.pad, &lo, &hi);
+        // 16 levels: the game changes the amplitude a little almost every frame in battle, and a report per frame over Bluetooth backs up
+        // the pad's input until it lags by seconds (#26). Nonzero stays nonzero.
+        auto q = [](uint16_t v) { return v ? static_cast<uint16_t>(std::max<unsigned>(v & 0xF000u, 0x1000u)) : uint16_t{0}; };
+        lo = q(lo);
+        hi = q(hi);
     }
     const Ctx cx = st.engine ? st.engine->context() : Ctx::Menu;
     const bool look_ctx = cx == Ctx::Play || cx == Ctx::Alt || cx == Ctx::Inspect;      // the right stick is a look only in play
-    const bool rumble_changed = lo != st.rumble_lo || hi != st.rumble_hi;
+    // A change goes out at most every 66 ms (about 15 a second); starting and stopping go out at once.
+    const bool rumble_edge = (lo || hi) != (st.rumble_lo || st.rumble_hi);
+    const bool rumble_changed = (lo != st.rumble_lo || hi != st.rumble_hi) && (rumble_edge || now - st.last_rumble_ns >= 66 * kMs);
     const bool rumble_refresh = (lo || hi) && now - st.last_rumble_ns > 100 * kMs;
     for (size_t i = 0; i < n; ++i) {
         platform::GamepadRaw raw;

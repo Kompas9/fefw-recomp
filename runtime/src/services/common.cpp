@@ -418,7 +418,11 @@ std::vector<RomfsMod> installed_mods() {
     std::error_code ec;
     const std::filesystem::path root = std::filesystem::u8path(mods_dir());
     if (mods_dir().empty() || !std::filesystem::is_directory(root, ec)) return out;
-    find_mods(root, "", 0, out);
+    try {
+        find_mods(root, "", 0, out);
+    } catch (const std::exception& e) {   // the iterators' increment throws on an I/O error despite ec; boot must not end over the mods folder
+        NXLOG_W("mods", "reading %s stopped: %s", mods_dir().c_str(), e.what());
+    }
     std::sort(out.begin(), out.end(), [](const RomfsMod& a, const RomfsMod& b) { return _stricmp(a.name.c_str(), b.name.c_str()) < 0; });
     return out;
 }
@@ -432,30 +436,34 @@ std::vector<AddOnContent> installed_aoc() {
     std::error_code ec;
     const stdfs::path root = stdfs::u8path(aoc_dir());
     if (!stdfs::is_directory(root, ec)) return out;
-    for (const stdfs::directory_entry& e : stdfs::directory_iterator(root, ec)) {
-        if (!e.is_directory(ec)) continue;
-        const std::string name = e.path().filename().string();
-        if (name.size() != 16 || !std::all_of(name.begin(), name.end(), [](unsigned char c) { return std::isxdigit(c) != 0; })) continue;
-        const uint64_t id = std::strtoull(name.c_str(), nullptr, 16);
-        if ((id & ~0xFFFull) != base || (id & 0xFFFull) == 0) continue;
-        stdfs::path rom = e.path() / "romfs";
-        if (!stdfs::is_directory(rom, ec)) {
-            // one level down: "<id>/<n>/romfs", the highest numbered folder that has a romfs/
-            rom.clear();
-            long best = -1;
-            for (const stdfs::directory_entry& sub : stdfs::directory_iterator(e.path(), ec)) {
-                const std::string sn = sub.path().filename().string();
-                if (sn.empty() || !std::all_of(sn.begin(), sn.end(), [](unsigned char c) { return std::isdigit(c) != 0; })) continue;
-                const long n = std::strtol(sn.c_str(), nullptr, 10);
-                if (n > best && stdfs::is_directory(sub.path() / "romfs", ec)) {
-                    best = n;
-                    rom = sub.path() / "romfs";
+    try {
+        for (const stdfs::directory_entry& e : stdfs::directory_iterator(root, ec)) {
+            if (!e.is_directory(ec)) continue;
+            const std::string name = u8str(e.path().filename());   // .string() throws on a name the code page cannot hold
+            if (name.size() != 16 || !std::all_of(name.begin(), name.end(), [](unsigned char c) { return std::isxdigit(c) != 0; })) continue;
+            const uint64_t id = std::strtoull(name.c_str(), nullptr, 16);
+            if ((id & ~0xFFFull) != base || (id & 0xFFFull) == 0) continue;
+            stdfs::path rom = e.path() / "romfs";
+            if (!stdfs::is_directory(rom, ec)) {
+                // one level down: "<id>/<n>/romfs", the highest numbered folder that has a romfs/
+                rom.clear();
+                long best = -1;
+                for (const stdfs::directory_entry& sub : stdfs::directory_iterator(e.path(), ec)) {
+                    const std::string sn = u8str(sub.path().filename());
+                    if (sn.empty() || !std::all_of(sn.begin(), sn.end(), [](unsigned char c) { return std::isdigit(c) != 0; })) continue;
+                    const long n = std::strtol(sn.c_str(), nullptr, 10);
+                    if (n > best && stdfs::is_directory(sub.path() / "romfs", ec)) {
+                        best = n;
+                        rom = sub.path() / "romfs";
+                    }
                 }
+                if (rom.empty()) continue;
             }
-            if (rom.empty()) continue;
+            const std::u8string u = rom.u8string();
+            out.push_back({id, static_cast<uint32_t>(id & 0xFFFull), std::string(reinterpret_cast<const char*>(u.data()), u.size())});
         }
-        const std::u8string u = rom.u8string();
-        out.push_back({id, static_cast<uint32_t>(id & 0xFFFull), std::string(reinterpret_cast<const char*>(u.data()), u.size())});
+    } catch (const std::exception& e) {   // the iterators' increment throws on an I/O error despite ec; boot must not end over game/dlc
+        NXLOG_W("aoc", "reading %s stopped: %s", aoc_dir().c_str(), e.what());
     }
     std::sort(out.begin(), out.end(), [](const AddOnContent& a, const AddOnContent& b) { return a.index < b.index; });
     return out;

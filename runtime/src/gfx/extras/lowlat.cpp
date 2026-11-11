@@ -2,6 +2,7 @@
 // Low-latency modes (include/nxrt/lowlat.h): NVIDIA Reflex (VK_NV_low_latency2) and AMD Anti-Lag 2 (VK_AMD_anti_lag).
 #include "nxrt/lowlat.h"
 #include "extras/temporal.h"
+#include "extras/framegen_ffx.h"
 
 #include <algorithm>
 #include <atomic>
@@ -86,9 +87,12 @@ struct LowLatency::Impl {
     bool active = false;                      // markers and the host measurement run (enabled, or log_timings asks for the numbers)
     bool running() const { return active || ft::on(); }     // the frame trace (S18 latency probe) also keeps the frame ids
 
+    // `swapchain` and `mode_set` change only with the queue lock held (and mu), so the Reflex calls read them under the queue lock they take
+    // anyway: the renderer destroys a swapchain under that lock too, and a handle read before it could be gone by the call.
     void marker(VkLatencyMarkerNV m, uint64_t id) {
-        if (!reflex || !swapchain || !mode_set) return;
+        if (!reflex) return;
         std::lock_guard<std::mutex> ql(dev->queue_mutex());      // never called with the queue lock held
+        if (!swapchain || !mode_set) return;
         VkSetLatencyMarkerInfoNV mi = {VK_STRUCTURE_TYPE_SET_LATENCY_MARKER_INFO_NV};
         mi.presentID = id;
         mi.marker = m;
@@ -107,7 +111,7 @@ struct LowLatency::Impl {
     }
 
     void poll_reports() {
-        if (!reflex || !swapchain || !mode_set) return;
+        if (!reflex) return;
         const uint64_t t = now_us();
         if (t - last_report_us < 200000) return;       // five polls a second are plenty
         last_report_us = t;
@@ -116,6 +120,7 @@ struct LowLatency::Impl {
         gi.pTimings = nullptr;
         {
             std::lock_guard<std::mutex> ql(dev->queue_mutex());
+            if (!swapchain || !mode_set) return;
             vkGetLatencyTimingsNV(dev->device(), swapchain, &gi);
         }
         if (gi.timingCount == 0) return;
@@ -124,6 +129,7 @@ struct LowLatency::Impl {
         gi.pTimings = v.data();
         {
             std::lock_guard<std::mutex> ql(dev->queue_mutex());
+            if (!swapchain || !mode_set) return;      // destroyed in between: the next swapchain has its own reports
             vkGetLatencyTimingsNV(dev->device(), swapchain, &gi);
         }
         double sum_gpu = 0, sum_sp = 0;
@@ -185,6 +191,12 @@ LowLatency::LowLatency(gfx::Device& dev) : impl_(new Impl) {
     if (extras::streamline_framegen_available()) {
         if (s.cfg.mode != LatencyMode::Off)
             NXLOG_I(kTag, "DLSS-G owns Reflex: disabling the runtime latency backend");
+        s.cfg.mode = LatencyMode::Off;
+    } else if (extras::ffx_fg_wanted()) {
+        // FSR 3 frame generation's swapchain (framegen_ffx.cpp) paces and presents on its own queues: Reflex markers and sleep on that
+        // swapchain (or Anti-Lag 2 without AMD's frame generation hooks) fight its pacing, as with DLSS-G.
+        if (s.cfg.mode != LatencyMode::Off)
+            NXLOG_I(kTag, "FSR 3 frame generation is on: disabling the runtime latency backend");
         s.cfg.mode = LatencyMode::Off;
     }
     const gfx::DeviceFeatures& f = dev.features();
@@ -252,6 +264,7 @@ void LowLatency::swapchain_created(VkSwapchainKHR sc) {
     if (enabled_) s.set_mode_locked();
 }
 
+// Called with the queue lock held, right before vkDestroySwapchainKHR under the same lock (vk_renderer.cpp): no Reflex call can be using it.
 void LowLatency::swapchain_destroyed(VkSwapchainKHR sc) {
     Impl& s = *impl_;
     std::lock_guard<std::mutex> lk(s.mu);
@@ -304,21 +317,16 @@ void LowLatency::sim_begin() {
         if (gpu_back >= 0 && s.paced && s.live_on && lp && FrameLimiter::now_ns() - lp < 250000000ull)
             if (auto fn = g_gpu_wait_fn.load()) fn(gpu_back, 50ull * 1000 * 1000);
     }
-    VkSwapchainKHR sc;
-    bool ready;
-    {
-        std::unique_lock<std::mutex> lk(s.mu);
-        sc = s.swapchain;
-        ready = s.mode_set;
-    }
-    if (s.reflex && sc && ready && s.live_on) {
+    if (s.reflex && s.live_on) {
         VkLatencySleepInfoNV si = {VK_STRUCTURE_TYPE_LATENCY_SLEEP_INFO_NV};
         si.signalSemaphore = s.sleep_sem;
-        si.value = ++s.sleep_value;
-        VkResult sr;
+        VkResult sr = VK_NOT_READY;
         {
             std::lock_guard<std::mutex> ql(s.dev->queue_mutex());     // returns at once; the wait below is what blocks
-            sr = vkLatencySleepNV(s.dev->device(), sc, &si);
+            if (s.swapchain && s.mode_set) {                          // read under the queue lock: the swapchain is destroyed under it
+                si.value = ++s.sleep_value;
+                sr = vkLatencySleepNV(s.dev->device(), s.swapchain, &si);
+            }
         }
         if (sr == VK_SUCCESS) {
             VkSemaphoreWaitInfo wi = {VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO};

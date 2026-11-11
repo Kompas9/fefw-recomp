@@ -20,13 +20,31 @@
 // the two engines are behind one mutex; no lock is ever held while waiting for the worker.
 #pragma once
 #include <cstdint>
+#include <cstring>
 
 namespace nxrt::gfx::haptic {
 
 // What the settings ask for ([pad] haptic).
 enum class Mode : uint8_t { Auto = 0, Off, Rumble, DualSense };
-const char* mode_name(Mode m);            // "auto" "off" "rumble" "dualsense"
-bool mode_from_name(const char* s, Mode* out);
+// Inline: play_config.cpp uses them in builds without this module (mpr_launcher).
+inline const char* mode_name(Mode m) {   // "auto" "off" "rumble" "dualsense"
+    switch (m) {
+        case Mode::Off: return "off";
+        case Mode::Rumble: return "rumble";
+        case Mode::DualSense: return "dualsense";
+        default: return "auto";
+    }
+}
+
+inline bool mode_from_name(const char* s, Mode* out) {
+    if (!s || !out) return false;
+    if (!std::strcmp(s, "auto")) *out = Mode::Auto;
+    else if (!std::strcmp(s, "off") || !std::strcmp(s, "none")) *out = Mode::Off;
+    else if (!std::strcmp(s, "rumble") || !std::strcmp(s, "standard")) *out = Mode::Rumble;
+    else if (!std::strcmp(s, "dualsense") || !std::strcmp(s, "haptics")) *out = Mode::DualSense;
+    else return false;
+    return true;
+}
 
 // What is actually driving the pad.
 enum class Backend : uint8_t {

@@ -130,6 +130,22 @@ bool os_write_overlaps(uint64_t lo, uint64_t hi) {
     return false;
 }
 
+// Import freezes (ImportFreeze): ranges whose CPU writes wait for a Vulkan import of the same pages. g_scope_mu orders them against
+// OsWriteScope: a file read never starts in a frozen range, and a freeze never starts over a file read in progress.
+constexpr int kFreezeSlots = 16;
+OsRange g_frz[kFreezeSlots];
+std::atomic<int> g_frz_n{0};
+std::mutex g_scope_mu;
+
+bool freeze_overlaps(uint64_t lo, uint64_t hi) {
+    if (!g_frz_n.load(std::memory_order_seq_cst)) return false;
+    for (OsRange& f : g_frz) {
+        const uint64_t h = f.hi.load(std::memory_order_seq_cst);
+        if (h && f.lo.load(std::memory_order_seq_cst) < hi && lo < h) return true;
+    }
+    return false;
+}
+
 uint64_t bit(uint64_t page) { return uint64_t{1} << (page & 63); }
 
 bool test(const std::atomic<uint64_t>* bm, uint64_t page) { return (bm[page >> 6].load(std::memory_order_acquire) & bit(page)) != 0; }
@@ -315,6 +331,15 @@ LONG CALLBACK on_fault(EXCEPTION_POINTERS* ep) {
     const ULONG_PTR kind = rec->ExceptionInformation[0];     // 0 read, 1 write, 8 execute
     if (kind != 0 && kind != 1) return EXCEPTION_CONTINUE_SEARCH;
     const uint64_t addr = static_cast<uint64_t>(rec->ExceptionInformation[1]);
+    // A write into a range an import has frozen (ImportFreeze): wait for the import, then let the write run again (the page is
+    // read-write again, or armed and handled below on the next fault).
+    if (kind == 1 && freeze_overlaps(addr, addr + 1)) {
+        for (int i = 0; freeze_overlaps(addr, addr + 1); ++i) {
+            if (i < 64) YieldProcessor();
+            else Sleep(i < 1000 ? 0 : 1);
+        }
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
 retry:
     const uint64_t generation = g_generation.load(std::memory_order_seq_cst);
     nxrt::HitchTimer ht(nxrt::kHpFaults);      // the hitch line: time in this handler (a wait for arm's exclusive lock included)
@@ -565,7 +590,7 @@ bool arm(Region* r, uint64_t first, uint64_t count) {
     if (any_set(r->ban.get(), first, count)) return false;
     // A file read (or a mapping change in memory.cpp) into these pages is in progress: leave them alone. Its scope is published before it
     // releases pages under the shared lock, so either this sees it, or its release waits for this arm and undoes it.
-    if (os_write_overlaps(a, a + n)) return false;
+    if (os_write_overlaps(a, a + n) || freeze_overlaps(a, a + n)) return false;
     if (table == 1 && heap_epoch() == epoch) {
         // what the walk below checks besides the table: no page read-guarded here, or read-only because another region armed it
         if (any_set(r->guard.get(), first, count)) return false;
@@ -640,7 +665,7 @@ bool guard(Region* r, uint64_t first, uint64_t count) {
     ExclusiveLock lk(r);
     if (!all_set(r->prot.get(), first, count) || any_set(r->ban.get(), first, count)) return false;
     const uint64_t a = r->base + first * kPage, n = count * kPage;
-    if (os_write_overlaps(a, a + n)) return false;
+    if (os_write_overlaps(a, a + n) || freeze_overlaps(a, a + n)) return false;
     set_bits(r->guard.get(), first, count, true);
     DWORD was = 0;
     if (!VirtualProtect(reinterpret_cast<void*>(a), static_cast<SIZE_T>(n), PAGE_NOACCESS, &was)) {
@@ -726,8 +751,73 @@ void os_slot_release(int slot) {
 
 OsWriteScope::OsWriteScope(const void* p, uint64_t n) {
     if (!n) return;
-    slot_ = os_slot_acquire(p, n);
+    const uint64_t lo = reinterpret_cast<uint64_t>(p) & ~(kPage - 1), hi = (reinterpret_cast<uint64_t>(p) + n + kPage - 1) & ~(kPage - 1);
+    for (int i = 0;; ++i) {      // the operating system's write would fail on a page an import froze: wait for the import
+        {
+            std::lock_guard<std::mutex> lk(g_scope_mu);
+            if (!freeze_overlaps(lo, hi)) {
+                slot_ = os_slot_acquire(p, n);
+                break;
+            }
+        }
+        Sleep(i < 1000 ? 0 : 1);
+    }
     before_os_write(p, n);
+}
+
+ImportFreeze::ImportFreeze(const void* p, uint64_t n) {
+    if (!n || !heap_exists()) return;
+    const uint64_t lo = reinterpret_cast<uint64_t>(p) & ~(kPage - 1), hi = (reinterpret_cast<uint64_t>(p) + n + kPage - 1) & ~(kPage - 1);
+    if (lo < kHeapBase || hi > kHeapBase + heap_reserved()) return;      // only the heap's primary view (the import goes through another)
+    {
+        std::lock_guard<std::mutex> lk(g_mu);
+        if (!g_veh) g_veh = AddVectoredExceptionHandler(1, on_fault);
+        if (!g_veh) return;
+    }
+    for (int i = 0; slot_ < 0; ++i) {   // after the file reads in progress there; then no new one starts until the end
+        {
+            std::lock_guard<std::mutex> lk(g_scope_mu);
+            if (!os_write_overlaps(lo, hi)) {
+                for (int k = 0; k < kFreezeSlots; ++k) {
+                    uint64_t expect = 0;
+                    if (g_frz[k].hi.load(std::memory_order_relaxed) == 0 && g_frz[k].lo.compare_exchange_strong(expect, lo | 1, std::memory_order_seq_cst)) {
+                        g_frz[k].lo.store(lo, std::memory_order_seq_cst);
+                        g_frz[k].hi.store(hi, std::memory_order_seq_cst);
+                        g_frz_n.fetch_add(1, std::memory_order_seq_cst);
+                        slot_ = k;
+                        break;
+                    }
+                }
+            }
+        }
+        if (slot_ < 0) Sleep(i < 1000 ? 0 : 1);
+    }
+    // Exclusive against arm() and region destruction: the read-write runs found here are ours until the destructor gives them back.
+    AcquireSRWLockExclusive(&g_transitions);
+    for (uint64_t a = lo; a < hi;) {
+        MEMORY_BASIC_INFORMATION mbi{};
+        if (VirtualQuery(reinterpret_cast<void*>(a), &mbi, sizeof mbi) != sizeof mbi) break;
+        const uint64_t end = std::min<uint64_t>(hi, reinterpret_cast<uint64_t>(mbi.BaseAddress) + mbi.RegionSize);
+        DWORD was = 0;
+        if (mbi.State == MEM_COMMIT && (mbi.Protect & 0xff) == PAGE_READWRITE && !(mbi.Protect & PAGE_GUARD) &&
+            VirtualProtect(reinterpret_cast<void*>(a), static_cast<SIZE_T>(end - a), PAGE_READONLY, &was))
+            runs_.emplace_back(a, end);
+        a = end;
+    }
+    ReleaseSRWLockExclusive(&g_transitions);
+}
+
+ImportFreeze::~ImportFreeze() {
+    if (slot_ < 0) return;
+    AcquireSRWLockExclusive(&g_transitions);
+    for (const auto& r : runs_) {
+        DWORD was = 0;
+        VirtualProtect(reinterpret_cast<void*>(r.first), static_cast<SIZE_T>(r.second - r.first), PAGE_READWRITE, &was);
+    }
+    ReleaseSRWLockExclusive(&g_transitions);
+    g_frz[slot_].hi.store(0, std::memory_order_seq_cst);
+    g_frz[slot_].lo.store(0, std::memory_order_seq_cst);
+    g_frz_n.fetch_sub(1, std::memory_order_seq_cst);
 }
 
 OsWriteScope::~OsWriteScope() { os_slot_release(slot_); }
