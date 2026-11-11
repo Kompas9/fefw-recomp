@@ -269,6 +269,28 @@ Files: `third_party/nvidia_streamline/include/` (unmodified). Copyright (c) NVID
 
 `sl.interposer.dll`, `sl.common.dll` and `sl.dlss.dll` (NVIDIA-signed, from `bin/x64` of the Streamline SDK v2.14.16 release, https://github.com/NVIDIA-RTX/Streamline/releases/tag/v2.14.16; MIT, `licenses/LICENSE.Streamline.MIT.txt`, third-party notices in `licenses/NOTICE.Streamline-3rd-party.md`) are not in this repository and this project does not distribute them. The game loads them at run time only, if you install them yourself. Copyright (c) NVIDIA CORPORATION.
 
+## RenHDrum 0.3.0 (MIT OR Apache-2.0)
+
+`renhdrum.dll` (built from the RenHDrum v0.3.0 source, https://github.com/trzz1214/RenHDrum/tree/v0.3.0; sha256
+`5b4821a9695ca01c1c91f3b3f52f25c97d2b8894e8206c6071caf52b26bad655`) is the HD Rumble and DualSense haptics engine that
+`src/gfx/haptic.cpp` loads at run time with `LoadLibraryExW` from the executable's own folder. It is rebuilt from that source
+with `RUSTFLAGS=-C target-feature=+crt-static` so that it imports only `KERNEL32.dll`, `ntdll.dll` and
+`api-ms-win-core-synch-l1-2-0.dll`: the upstream release binary needs `VCRUNTIME140.dll`, which this project does not ship,
+and the haptics would otherwise fail on a machine without the Visual C++ redistributable. The export table is identical to
+the upstream one (47 names), so the C ABI and the `renhdrum_version()` check are unchanged.
+
+Its core library is dual-licensed MIT OR Apache-2.0, so unlike the Streamline and FidelityFX DLLs it is distributed with the
+release package: the haptics work without the player installing anything. Delete the file and the game keeps the standard
+two-motor rumble.
+
+The file is used unmodified through its C ABI (`renhdrum_engine_*`, `renhdrum_dualsense_dsp_*`, `renhdrum_set_nx2_mode`); no
+RenHDrum source is compiled into this project and nothing is linked. Its GPL-3.0 `integrations/brontide/` patches are not used.
+
+Copyright (c) 2026 Three-Dola. Licence texts: `third_party/renhdrum/LICENSE-MIT` and `third_party/renhdrum/LICENSE-APACHE`;
+the upstream NOTICE, including its MIT-licensed Ryujinx/Ryuhdr heritage and the dekuNukem and Switchbrew documentation
+credits, is reproduced in `third_party/renhdrum/NOTICE` and shipped as `licenses/NOTICE.RenHDrum.txt`. The build recipe and
+both hashes are in `third_party/renhdrum/SHA256SUMS`.
+
 ## NVIDIA DLSS (nvngx_dlss.dll, not shipped) and Intel XeSS (not shipped)
 
 `nvngx_dlss.dll` (NVIDIA DLSS Super Resolution 310.9.16) is under the NVIDIA RTX SDKs LICENSE (v. March 14, 2024; https://github.com/NVIDIA/DLSS/blob/main/LICENSE.txt, a copy is `licenses/LICENSE.NVIDIA-RTX-SDKs.txt` in the release). That licence requires redistributors to pass on terms at least as protective as its own and forbids any use that subjects the SDK to a licence requiring it to be redistributable at no charge (section 4e), which does not fit a GPL-3.0 package, so this repository does not contain the file and this project neither distributes nor downloads it. `libxess.dll` (Intel XeSS) is never shipped either; `xess_dll` is read but not used (see `docs/CONFIG.md`). The DLSS SDK itself (NGX static library) is not used.
