@@ -120,6 +120,7 @@ struct Pass {
     Target color[8];
     Target depth;
     VkExtent2D extent = {0, 0};
+    uint32_t layers = 1;         // common layer range attached to the active rendering pass
     VkFormat color_fmt[8] = {};
     VkFormat depth_fmt = VK_FORMAT_UNDEFINED;
     bool has_stencil = false;
@@ -562,7 +563,9 @@ Target make_target(Texture* t, const TextureViewInfo& v, bool has_view) {
         if (v.has_levels) tg.level = static_cast<uint32_t>(v.min_level);
         if (v.has_layers) {
             tg.layer = static_cast<uint32_t>(v.min_layer);
-            tg.layers = std::max(1, v.num_layers);
+            // A zero layer count spans the remaining texture layers, as for sampled views.
+            tg.layers = v.num_layers == 0 && t && tg.layer < t->layers
+                ? t->layers - tg.layer : std::max(1, v.num_layers);
         }
         else if (t && t->layers > 1 && t->b.target != NVN_TEXTURE_TARGET_3D) tg.layers = t->layers;   // a view without layers
         if (v.has_format) {
@@ -717,6 +720,7 @@ bool ensure_pass(bool depth_ro = false, bool writes = false) {
         if (colors[i].imageView) layer_count = std::min(layer_count, std::max<uint32_t>(1, P.color[i].layers));
     if (have_depth) layer_count = std::min(layer_count, std::max<uint32_t>(1, P.depth.layers));
     ri.layerCount = layer_count == UINT32_MAX ? 1 : layer_count;
+    P.layers = ri.layerCount;
     uint32_t last = 0;
     for (uint32_t i = 0; i < S.ncolor; ++i)
         if (colors[i].imageView) last = i + 1;
@@ -3334,7 +3338,7 @@ VkClearRect full_rect() {
     VkClearRect r = {};
     r.rect = S.nsc ? scissor_rect(S.sc[0]) : VkRect2D{{0, 0}, P.extent};
     r.baseArrayLayer = 0;
-    r.layerCount = 1;
+    r.layerCount = P.layers;
     return r;
 }
 
