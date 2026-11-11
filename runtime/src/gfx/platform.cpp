@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "nxrt/config.h"
+#include "nxrt/haptic.h"
 #include "nxrt/input.h"
 #include "nxrt/log.h"
 
@@ -169,6 +170,8 @@ void gamepad_opened(SDL_JoystickID id, uint64_t ts) {
     NXLOG_I(kTag, "gamepad %u sensors: accel=%d gyro=%d labels=%d%d%d%d", static_cast<unsigned>(id), accel_on ? 1 : 0,
             gyro_on ? 1 : 0, labels[0], labels[1], labels[2], labels[3]);
 
+    gfx::haptic::pad_added(static_cast<uint32_t>(id));   // the pad is open now: let the haptics pick their backend
+
     input::Event e = make_event(input::EventType::GamepadAdded, ts);
     e.u.gamepad.id = id;
     input::queue_push(e);
@@ -178,6 +181,7 @@ void gamepad_opened(SDL_JoystickID id, uint64_t ts) {
 void gamepad_closed(SDL_JoystickID id, uint64_t ts) {
     for (auto it = g_pads.begin(); it != g_pads.end(); ++it) {
         if (it->id != id) continue;
+        gfx::haptic::pad_removed(static_cast<uint32_t>(id));   // stop the haptics before the joystick goes away
         SDL_CloseGamepad(it->pad);
         g_pads.erase(it);
         input::gamepad_remove_info(id);
@@ -261,6 +265,12 @@ void translate(const SDL_Event& ev) {
 
         case SDL_EVENT_GAMEPAD_REMOVED:
             gamepad_closed(ev.gdevice.which, ts);
+            break;
+
+        case SDL_EVENT_AUDIO_DEVICE_ADDED:
+        case SDL_EVENT_AUDIO_DEVICE_REMOVED:
+            // The DualSense haptics ride on its USB audio endpoint: look for it as soon as SDL says it changed.
+            gfx::haptic::audio_devices_changed();
             break;
 
         case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
@@ -349,6 +359,7 @@ bool init(const InitOptions& opt) {
 
 void shutdown() {
     if (!g_inited) return;
+    gfx::haptic::shutdown();
     destroy_window();
     for (const OpenPad& p : g_pads) {
         SDL_CloseGamepad(p.pad);

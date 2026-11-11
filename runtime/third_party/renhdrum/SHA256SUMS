@@ -1,0 +1,41 @@
+RenHDrum 0.3.0, built from the upstream v0.3.0 source tree
+https://github.com/trzz1214/RenHDrum/tree/v0.3.0
+
+The release binary at
+https://github.com/trzz1214/RenHDrum/releases/download/v0.3.0/renhdrum-v0.3.0.zip
+(assets: renhdrum-v030.dll, renhdrum-v030.h, SHA256SUMS-v030.txt) imports
+VCRUNTIME140.dll, which this project does not ship: on a machine without the
+Visual C++ redistributable the haptics would silently fall back to the standard
+rumble. renhdrum.dll here is therefore rebuilt from that same source with the C
+runtime linked statically, so it depends on the system DLLs only.
+
+Build, from a checkout of the v0.3.0 tag:
+
+    set RUSTFLAGS=-C target-feature=+crt-static
+    cargo build --release
+
+The result was 414208 bytes with these dependencies:
+
+    api-ms-win-core-synch-l1-2-0.dll
+    KERNEL32.dll
+    ntdll.dll
+
+No VCRUNTIME140.dll, no MSVCP140.dll, no api-ms-win-crt-*.dll. The export table
+is identical to the upstream DLL (47 names, compared with dumpbin /exports), so
+the C ABI and the renhdrum_version() check are unchanged: 0x000300.
+
+renhdrum.h is the upstream v0.3.0 header, byte for byte.
+
+5b4821a9695ca01c1c91f3b3f52f25c97d2b8894e8206c6071caf52b26bad655  renhdrum.dll
+ea23a7843ec471799adab6e1af1c85406aed505af2d8b57df03d7cb48ecac358  renhdrum.h
+
+For reference, the upstream release binary was 299008 bytes with sha256
+33c88b343fa49627cc09fcd0cee7e46f5a85e16e77f1d404e44574d42eaa74e8; it is not
+shipped here.
+
+LICENSE-MIT, LICENSE-APACHE and NOTICE are copied from the same source tree: the
+core of RenHDrum is dual licensed MIT OR Apache-2.0, and NOTICE asks for
+"Copyright (c) 2026 Three-Dola" to be kept. The GPL-3.0-or-later parts of that
+project (integrations/brontide, integrations/recomp-c/reference) are not used
+here: the host calls the prebuilt library through its C ABI and does not build
+any of its sources.

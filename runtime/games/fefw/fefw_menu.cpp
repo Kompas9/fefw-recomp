@@ -46,6 +46,7 @@
 #include "nxrt/lowlat.h"
 #include "nxrt/overlay.h"
 #include "nxrt/menu_i18n.h"
+#include "nxrt/haptic.h"
 #include "nxrt/platform.h"
 #include "play_types.h"
 #include "play_ui.h"
@@ -60,6 +61,7 @@ namespace {
 
 constexpr const char* kTag = "menu";
 namespace hid = nxrt::hid;
+namespace haptic = nxrt::gfx::haptic;
 using nxrt::gfx::tr;
 using play::UiHost;
 
@@ -962,6 +964,52 @@ void mouse_section(UiHost& host, Menu& m) {
     }
 }
 
+// ---- Haptics ----------------------------------------------------------------------------------------------------------------------------
+// How the game's HD Rumble value reaches the pad. The backends live in gfx/haptic.cpp: the standard two-motor rumble always
+// works, the DualSense gets real haptics on a cable, a Switch Pro Controller gets HD Rumble packets. The state line reports
+// what is actually driving the pad, not what was asked for.
+constexpr const char* kHapticNames[] = {"Automatic", "Off", "Standard rumble", "DualSense haptics"};
+constexpr int kHapticCount = 4;
+
+void haptic_group(UiHost& host, Menu& m) {
+    play::PadSettings& p = m.edit.pad;
+    const haptic::Status st = haptic::status();
+    section("Haptics");
+    if (begin_rows("haptic")) {
+        row(m, "Vibration", When::Live,
+            "Automatic: DualSense haptics on a cable, HD Rumble for a Switch Pro Controller, the standard rumble for "
+            "anything else. A mode change applies at once; if a backend cannot start, the standard rumble takes over.");
+        int mode = std::clamp(p.haptic, 0, kHapticCount - 1);
+        if (combo(m, "##hap", &mode, kHapticNames, kHapticCount)) {
+            p.haptic = mode;
+            apply(host, m);
+        }
+        row(m, "Vibration strength", When::Live,
+            "For the haptic backends. Left at -1 the haptics follow the rumble strength above instead, so an untouched "
+            "controls.ini keeps one strength knob; 0 silences them.");
+        double strength = static_cast<double>(p.haptic_strength);
+        if (slider(m, "##haps", &strength, -1.0, 100.0, 1.0, "%.0f%%")) {
+            p.haptic_strength = static_cast<int>(std::lround(strength));
+            apply(host, m);
+        }
+        row(m, "Test", When::Info, nullptr);
+        const bool can_test = st.running && st.requested != haptic::Mode::Off;
+        ImGui::BeginDisabled(!can_test);
+        if (button(m, "Buzz once")) haptic::test_start();
+        ImGui::EndDisabled();
+        end_rows();
+    }
+    if (!st.dll) ImGui::TextDisabled("%s", tr("renhdrum.dll is not next to the game: the standard rumble only."));
+    if (st.device[0] == 0) {
+        ImGui::TextDisabled("%s", tr("No pad for the haptics yet."));
+    } else {
+        ImGui::TextDisabled(tr("%s: %s, %s"), st.device, tr(haptic::backend_name(st.backend)), tr(st.wired ? "on a cable" : "wireless"));
+        if (st.detail[0]) ImGui::TextWrapped("%s", tr(st.detail));
+        ImGui::TextDisabled(tr("Live: %s; %llu values from the game, %llu packets sent."), st.running ? tr("yes") : tr("no"),
+                            static_cast<unsigned long long>(st.pushes), static_cast<unsigned long long>(st.packets));
+    }
+}
+
 void controls_page(UiHost& host, Menu& m, const play::LiveStatus& live) {
     play::PadSettings& p = m.edit.pad;
     section("Controller");
@@ -996,6 +1044,7 @@ void controls_page(UiHost& host, Menu& m, const play::LiveStatus& live) {
     }
     if (live.pads == 0) ImGui::TextDisabled("%s", tr("No controller connected."));
     else ImGui::TextDisabled(tr("%d connected: %s (rumble %s)"), live.pads, live.pad_name.c_str(), live.pad_rumble ? "yes" : "no");
+    haptic_group(host, m);
     mouse_section(host, m);
 
     section("Button mapping");
