@@ -556,6 +556,11 @@ def main():
     t0 = time.time()
     times = {}
     try:
+        # zig reads the compiler's Makefile-style .d files back and chokes on a ':' in a path ("illegal char ... expected_colon"),
+        # which fails the link only after the whole compile. Only a Windows drive letter ('C:') may have one.
+        if ':' in os.path.splitdrive(game)[1]:
+            raise Fail('The game folder path contains a ":" (%s), which the bundled compiler cannot handle. '
+                       'Rename the folder so it has no ":" and run Set up again.' % game)
         if not os.path.isfile(ZIG):
             raise Fail('The bundled compiler is missing (%s). Extract the release zip again.' % ZIG)
         variant, why = pick_variant(a.cpu)
