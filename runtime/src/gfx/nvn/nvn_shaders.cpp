@@ -10,6 +10,7 @@
 // neither the names nor the numbers carry is the c[0] offset a storage buffer's address was loaded from; that comes
 // from the harness's results.tsv (apply_harness).
 #include "nvn_shaders.h"
+#include "nvn_spirv_patch.h"
 
 #include <windows.h>
 
@@ -1087,13 +1088,41 @@ bool ShaderCache::pack_read(const std::string& hash, std::string& out) {
     return true;
 }
 
+// Sampled images the shader reads only as integer bits become uint images (spirv_predict_int_fetches): through the float alias of an
+// R32UI texture NVIDIA flushes the denormal bit patterns to zero (the clustered light grid read empty: issue #89). Done here, before the
+// reflection, so the binding is reflected as a uint image and gets a UINT view; the pack and the .spv files keep the translator's words.
+// [nvn] int_fetch_retype = false: off (A/B).
+static void retype_int_fetches(const std::string& hash, std::string& bytes) {
+    static const bool on = nxrt::config_get_bool("nvn", "int_fetch_retype", true);
+    if (!on || bytes.size() < 20 || bytes.size() % 4) return;
+    std::vector<uint32_t> words(bytes.size() / 4);
+    std::memcpy(words.data(), bytes.data(), bytes.size());
+    const std::vector<gpu::SpvIntSampler> slots = gpu::spirv_predict_int_fetches(words);
+    if (slots.empty()) return;
+    std::vector<uint32_t> patched;
+    static std::atomic<int> done{0}, failed{0};
+    if (!gpu::spirv_int_samplers(words, slots, patched)) {
+        if (failed.fetch_add(1, std::memory_order_relaxed) < 4)
+            NXLOG_W("nvn", "shader %s: integer fetch through set %u binding %u left as a float image (the rewrite declined the module)", hash.c_str(),
+                    slots[0].set, slots[0].binding);
+        return;
+    }
+    bytes.assign(reinterpret_cast<const char*>(patched.data()), patched.size() * 4);
+    if (done.fetch_add(1, std::memory_order_relaxed) < 3)
+        NXLOG_I("nvn", "shader %s: %zu sampled image(s) read only as integer bits (set %u binding %u first) are uint images", hash.c_str(), slots.size(),
+                slots[0].set, slots[0].binding);
+}
+
 bool ShaderCache::read_spv(const std::string& hash, std::string& out) {
     if (pack_read(hash, out)) {
         pre_from_pack_.fetch_add(1, std::memory_order_relaxed);
+        retype_int_fetches(hash, out);
         return true;
     }
     pre_from_files_.fetch_add(1, std::memory_order_relaxed);
-    return read_file(dir_ + "/" + hash + ".spv", out);
+    if (!read_file(dir_ + "/" + hash + ".spv", out)) return false;
+    retype_int_fetches(hash, out);
+    return true;
 }
 
 // Reads the frames front to back on its own handle, ahead of the workers: one sequential read of the card, whose data the workers' reads

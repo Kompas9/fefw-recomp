@@ -541,3 +541,44 @@ NXTEST(predict_int_inputs_from_the_code) {
     CHECK(gpu::spirv_predict_int_inputs(std::vector<uint32_t>{1u, 2u}).empty());
 }
 
+
+// Issue #89: the deferred light pass reads the clustered light grid (an R32UI 3D image) with texelFetch and bitcasts the texel to int.
+// spirv_predict_int_fetches names that binding; the rewrite makes it a uint image that reflects as such (the binding then gets a UINT
+// view, whose bits NVIDIA's texture unit does not flush as float denormals).
+NXTEST(predict_int_fetches_retypes_the_light_grid) {
+    if (const char* why = absent_input()) {
+        nxtest::skip(why);
+        return;
+    }
+    const char* kLightPassHash = "6385c299b541c5be";   // Shaders/Lighting.bfsha, deferred light pass; the grid at set 2 binding 133
+    std::vector<uint32_t> in;
+    if (!load_hash(kLightPassHash, in)) { nxtest::skip("the light pass fragment shader is not in the shader cache"); return; }
+    const std::vector<gpu::SpvIntSampler> slots = gpu::spirv_predict_int_fetches(in);
+    REQUIRE(slots.size() == 1);
+    CHECK_EQ(slots[0].set, 2u);
+    CHECK_EQ(slots[0].binding, 133u);
+    CHECK(!slots[0].is_signed);
+    std::vector<uint32_t> out;
+    REQUIRE(gpu::spirv_int_samplers(in, slots, out));
+    std::string log;
+    CHECK_MSG(run_spirv_val(out, "int_fetch_light_pass", log) == 0, log);
+    ShaderReflection r;
+    std::string err;
+    REQUIRE(reflect(out, r, err));
+    bool found = false;
+    for (const DescriptorBinding& b : r.bindings) {
+        if (b.set != 2) continue;
+        if (b.binding == 133) {
+            found = true;
+            CHECK_MSG(b.image.component == ScalarType::Uint, std::string("binding 133 reflects as ") + type_name(b.image.component));
+        } else if (b.image.component != ScalarType::Float) {
+            CHECK_MSG(false, "another sampled image changed type");
+        }
+    }
+    CHECK(found);
+    CHECK(gpu::spirv_predict_int_fetches(out).empty());          // a second pass finds nothing: loading twice is harmless
+    std::vector<uint32_t> plain;
+    REQUIRE(load_hash(kConstFragHash, plain));
+    CHECK(gpu::spirv_predict_int_fetches(plain).empty());
+    CHECK(gpu::spirv_predict_int_fetches(std::vector<uint32_t>{1u, 2u}).empty());
+}

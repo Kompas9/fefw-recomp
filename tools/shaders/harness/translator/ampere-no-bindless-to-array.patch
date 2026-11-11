@@ -3,6 +3,14 @@ into an array of QueryTextureArrayLengthFromBuffer textures indexed by offset / 
 uniform block's size is not known offline (Fire Emblem Fortune's Weave reads handles at c[0xe][idx * 8 + 0x340], past any
 fixed guess). Those handles go to the pool lookup instead (ampere-bindless-pool.patch). Applied at build time by
 translator/Ryujinx.Graphics.Shader.csproj to a copy under the build folder. The Ryujinx code in the context lines is MIT.
+
+Second hunk (issue #29): fine derivatives. NVN2 shaders spell dFdx/dFdy as SHFL.BFLY 1|2, 0x1c03 then FSWZADD with
+0x66 (DDX) or 0x5a (DDY), not the 0x99/0xa5 the upstream match expects, so they stayed a subgroup shuffle plus a lane
+swizzle. Vulkan does not make helper invocations take part in a plain subgroup shuffle (AMD leaves them out), so at
+triangle edges the neighbour read was garbage: the eye shader picks the left or right eye's look offset by the sign of
+dFdx(uv.x) and drew the other eye's iris in those quads. As OpDPdx/OpDPdy the helpers are guaranteed. The per-lane
+table of SwizzleAdd (lane 0 = top left, 1 top right, 2 bottom left) gives 0x66 = +ddx and 0x5a = +ddy; the upstream
+masks are the negations under that table and never occur in the corpus, so they are left to the generic path.
 --- a/Translation/Optimizations/Optimizer.cs
 +++ b/Translation/Optimizations/Optimizer.cs
 @@ -28,10 +28,6 @@
@@ -16,3 +24,15 @@ translator/Ryujinx.Graphics.Shader.csproj to a copy under the build folder. The 
                  }
  
                  BindlessElimination.RunPass(context.Blocks[blkIndex], context.ResourceManager, context.GpuAccessor);
+@@ -278,7 +274,9 @@
+                 int mask = fswzaddSrc3.Value;
+ 
+-                if ((isDdx && mask != 0b10011001) ||
+-                    (isDdy && mask != 0b10100101))
++                // NVN2 (Ampere) encodings: 0x66 is neighbour - own on the left column and own - neighbour on the right
++                // (+DDX after BFLY 1); 0x5a the same by rows (+DDY after BFLY 2). See the header of this patch.
++                if ((isDdx && mask != 0b01100110) ||
++                    (isDdy && mask != 0b01011010))
+                 {
+                     continue;
+                 }

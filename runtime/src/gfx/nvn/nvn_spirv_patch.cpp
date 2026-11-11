@@ -1045,4 +1045,97 @@ bool spirv_int_samplers(const std::vector<uint32_t>& in, const std::vector<SpvIn
     return true;
 }
 
+std::vector<SpvIntSampler> spirv_predict_int_fetches(const std::vector<uint32_t>& in) {
+    enum : uint32_t { OpTypeIntOp = 21, OpTypeFloatOp = 22, OpTypeImageOp = 25, OpTypeSampledImageOp = 27, OpTypePointerOp = 32,
+                      OpFunctionOp = 54, OpVariableOp = 59, OpLoadOp = 61, OpDecorateOp = 71, OpCompositeExtractOp = 81,
+                      OpImageSampleImplicitLodOp = 87, OpImageSparseFirstOp = 305, OpImageFetchOp = 95, OpImageOp = 100, OpBitcastOp = 124,
+                      DecBinding = 33, DecDescriptorSet = 34, StorageUniformConstant = 0, Dim3D = 2 };
+    std::vector<SpvIntSampler> slots;
+    if (in.size() < 5 || in[0] != 0x07230203u) return slots;
+    std::vector<Inst> insts;
+    for (size_t i = 5; i < in.size();) {
+        const uint32_t len = in[i] >> 16;
+        if (!len || i + len > in.size()) return slots;
+        insts.push_back({i, in[i] & 0xffff, len});
+        i += len;
+    }
+    uint32_t f32 = 0;
+    std::map<uint32_t, bool> int32;                                // 32-bit integer type ids
+    std::map<uint32_t, uint32_t> set_of, binding_of, sampled_of, ptr_pointee;
+    std::map<uint32_t, std::vector<uint32_t>> image_words;
+    std::vector<uint32_t> vars;                                    // candidate variables, in declaration order
+    std::map<uint32_t, bool> cand;
+    bool in_functions = false;
+    for (const Inst& n : insts) {
+        const uint32_t* w = &in[n.at];
+        if (n.op == OpFunctionOp) { in_functions = true; break; }
+        if (n.op == OpDecorateOp && n.len >= 4 && w[2] == DecDescriptorSet) set_of[w[1]] = w[3];
+        else if (n.op == OpDecorateOp && n.len >= 4 && w[2] == DecBinding) binding_of[w[1]] = w[3];
+        else if (n.op == OpTypeFloatOp && n.len >= 3 && w[2] == 32) f32 = w[1];
+        else if (n.op == OpTypeIntOp && n.len == 4 && w[2] == 32) int32[w[1]] = true;
+        else if (n.op == OpTypeImageOp && n.len >= 9) image_words[w[1]] = std::vector<uint32_t>(w + 2, w + n.len);
+        else if (n.op == OpTypeSampledImageOp && n.len == 3) sampled_of[w[1]] = w[2];
+        else if (n.op == OpTypePointerOp && n.len == 4 && w[2] == StorageUniformConstant) ptr_pointee[w[1]] = w[3];
+        else if (n.op == OpVariableOp && n.len >= 4 && w[3] == StorageUniformConstant) {
+            auto p = ptr_pointee.find(w[1]);
+            if (p == ptr_pointee.end()) continue;
+            auto s = sampled_of.find(p->second);
+            if (s == sampled_of.end()) continue;               // an array of samplers, a storage image, a separate image: not handled
+            auto iw = image_words.find(s->second);
+            // OpTypeImage operands: sampled type, Dim, Depth, Arrayed, MS, Sampled, format. A float, non-depth, single-sample sampled image.
+            // 3D only: the light grid is a 3D image, and a 2D fetch bitcast to integers is as often a bitwise copy of a float or UNORM
+            // texture (which a UINT view would turn into the dummy).
+            if (iw == image_words.end() || iw->second.size() < 7 || iw->second[0] != f32 || iw->second[1] != Dim3D || iw->second[2] == 1 ||
+                iw->second[4] != 0 || iw->second[5] != 1) continue;
+            if (!set_of.count(w[2]) || !binding_of.count(w[2])) continue;
+            cand[w[2]] = true;
+            vars.push_back(w[2]);
+        }
+    }
+    if (!f32 || cand.empty() || !in_functions) return slots;
+
+    // Loads of the candidates, OpImage of those loads, fetches through those images. A sample, gather or depth compare through a candidate
+    // rules it out (a float texture); any other use is left to spirv_int_samplers, which then declines the module as a whole.
+    std::map<uint32_t, uint32_t> loaded, images, fetched, extracted;   // id -> its variable
+    std::map<uint32_t, size_t> def_at;                                 // fetch / extract result -> its defining instruction
+    std::map<uint32_t, bool> bad, has_fetch;
+    for (const Inst& n : insts) {
+        const uint32_t* w = &in[n.at];
+        if (n.op == OpLoadOp && n.len >= 4 && cand.count(w[3])) loaded[w[2]] = w[3];
+        else if (n.op == OpImageOp && n.len == 4 && loaded.count(w[3])) images[w[2]] = loaded[w[3]];
+        else if (n.op == OpImageFetchOp && n.len >= 5 && images.count(w[3])) {
+            fetched[w[2]] = images[w[3]];
+            def_at[w[2]] = n.at;
+            has_fetch[images[w[3]]] = true;
+        } else if (((n.op >= OpImageSampleImplicitLodOp && n.op <= 97) || (n.op >= OpImageSparseFirstOp && n.op <= 315)) && n.len >= 4 && loaded.count(w[3])) {
+            bad[loaded[w[3]]] = true;
+        }
+    }
+    if (fetched.empty()) return slots;
+    // Every use of a fetch result is an OpCompositeExtract of it (pass 0), every use of such an extract an OpBitcast to a 32-bit integer
+    // type (pass 1). The defining instruction is not a use.
+    for (int pass = 0; pass < 2; ++pass) {
+        const std::map<uint32_t, uint32_t> ids = pass == 0 ? fetched : extracted;
+        for (const Inst& n : insts) {
+            const uint32_t* w = &in[n.at];
+            for (uint32_t k = 1; k < n.len; ++k) {
+                auto it = ids.find(w[k]);
+                if (it == ids.end()) continue;
+                auto d = def_at.find(w[k]);
+                if (k == 2 && d != def_at.end() && d->second == n.at) continue;
+                const bool ok = pass == 0 ? (n.op == OpCompositeExtractOp && k == 3 && n.len >= 5)
+                                          : (n.op == OpBitcastOp && k == 3 && n.len == 4 && int32.count(w[1]));
+                if (!ok) { bad[it->second] = true; continue; }
+                if (pass == 0) {
+                    extracted[w[2]] = it->second;
+                    def_at[w[2]] = n.at;
+                }
+            }
+        }
+    }
+    for (uint32_t v : vars)
+        if (has_fetch.count(v) && !bad.count(v)) slots.push_back({set_of[v], binding_of[v], false});
+    return slots;
+}
+
 }  // namespace nxrt::nvn::be::gpu

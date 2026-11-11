@@ -71,6 +71,14 @@ struct SpvIntSampler {
 };
 bool spirv_int_samplers(const std::vector<uint32_t>& in, const std::vector<SpvIntSampler>& slots, std::vector<uint32_t>& out);
 
+// The sampled images a shader reads only as integer bits: single float, non-depth 3D sampled images that are only fetched (texelFetch, no
+// sample or gather), every fetched component going straight into an OpBitcast to a 32-bit integer. On the console that is a TLD of an
+// integer texture (Fortune's Weave's clustered light grid, an R32UI 3D image whose texels are light bit masks). Read through the float
+// alias the bits are mostly float denormals, and NVIDIA's texture unit flushes those to zero: the masks read as empty and no local light
+// reaches the lit surfaces (issue #89). These slots (is_signed = false) go to spirv_int_samplers when the module is loaded, so the binding
+// is reflected as a uint image and gets a UINT view (the console's bits, on every GPU). Empty when the module has none.
+std::vector<SpvIntSampler> spirv_predict_int_fetches(const std::vector<uint32_t>& in);
+
 // A geometry shader the translator made for a console "passthrough" geometry shader (the hardware copies every attribute of the input
 // vertices to the output vertices; the shader code only sets the position and gl_Layer, so its translation writes no Location output at
 // all). Adds the outputs for `slots` like spirv_add_outputs and makes the k-th OpEmitVertex copy the input at the same Location of vertex k.
