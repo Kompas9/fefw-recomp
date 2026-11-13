@@ -817,6 +817,14 @@ void init_locked() {
         s.st.store(2);
         return;
     }
+    // auto leaves integrated GPUs on the CPU path: on an AMD Radeon iGPU a new area's transcodes (with [gfx] astc_bc = bc1, its default
+    // there) held frames for 1 to 2 s each, up to Windows' 2 s GPU timeout, and one run ended in VK_ERROR_DEVICE_LOST. [gfx] astc_gpu = on
+    // still uses the GPU there.
+    if (m == "auto" && device().properties().deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) {
+        NXLOG_I(kTag, "ASTC textures are transcoded on the CPU on this integrated GPU ([gfx] astc_gpu = auto; on uses the GPU)");
+        s.st.store(2);
+        return;
+    }
     {
         std::string c = nxrt::config_get_str("gfx", "astc_gpu_cache", "auto");
         std::transform(c.begin(), c.end(), c.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
