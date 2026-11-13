@@ -93,6 +93,13 @@ stay sharp. It works best with VSync off on a 120 Hz or faster display: with VSy
 rate, and on a display slower than twice the game's frame rate generation pauses. **Settings > Picture > FSR 3 (AMD) folder** shows
 whether the files are found, and can point to another folder. If a file is missing, `fefw.log` names it and the game carries on with TAAU (or without frame generation).
 
+### XeSS (any GPU, best on Intel Arc)
+
+XeSS needs Intel's `libxess.dll`, which you download from `bin/` of the [XeSS SDK 3.0.2](https://github.com/intel/xess/releases/tag/v3.0.2)
+release. Put it in `upscalers\xess` next to `fefw-launcher.exe` (create the folder). It also needs the
+[Microsoft Visual C++ 2015-2022 Redistributable (x64)](https://aka.ms/vs/17/release/vc_redist.x64.exe). Then choose **Intel XeSS** as the
+Upscaler in **Settings** and restart the game. If the file or the runtime is missing, `fefw.log` says so and the game uses TAAU.
+
 ### Keyboard and controller
 
 Any controller works, and so does the keyboard, with no setup. The button prompts in the game follow the one you used last: press a

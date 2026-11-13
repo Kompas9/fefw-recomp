@@ -496,8 +496,8 @@ constexpr const char* kShadowVals[] = {"0", "1024", "1536", "2048", "3072", "409
 constexpr const char* kQualityNames[] = {"Console (handheld configs keep their cuts)", "Docked quality in every config"};
 constexpr const char* kQualityVals[] = {"console", "docked"};
 constexpr const char* kUpscalerNames[] = {"TAAU (built in, temporal)", "DLSS (NVIDIA RTX, through Streamline)", "FSR 3 (AMD FidelityFX)",
-                                          "Bilinear (no anti-aliasing)", "Auto (DLSS, else FSR 3, else TAAU)"};
-constexpr const char* kUpscalerVals[] = {"taau", "dlss", "fsr3", "bilinear", "auto"};
+                                          "XeSS (Intel, any GPU with DP4a)", "Bilinear (no anti-aliasing)", "Auto (DLSS, else XeSS, else FSR 3, else TAAU)"};
+constexpr const char* kUpscalerVals[] = {"taau", "dlss", "fsr3", "xess", "bilinear", "auto"};
 constexpr const char* kFgNames[] = {"Off", "DLSS Frame Generation (RTX 40 or newer)", "FSR 3 frame generation"};
 constexpr const char* kFgVals[] = {"0", "dlss", "fsr3"};
 constexpr const char* kHdrModeNames[] = {"Off", "Auto", "On", "Native"};
@@ -604,10 +604,11 @@ void upscaler_group(Menu& m) {
         const IniKey& up = *ini_key("dlss", "upscaler");
         ini_combo_row(m, up, "Upscaler",
                       "What answers the game's DLSS calls. TAAU needs nothing; DLSS needs an RTX GPU and the Streamline DLLs ([upscale] dlss_dll); "
-                      "FSR 3 runs on any GPU with AMD's FidelityFX DLLs (upscalers\\fsr in the release package, or [upscale] fsr_dll). One that "
-                      "cannot run falls back to TAAU and the log names the missing file. "
-                      "Choosing DLSS (or Auto with the DLLs present) takes effect at the next start.",
-                      kUpscalerNames, kUpscalerVals, 5);
+                      "FSR 3 runs on any GPU with AMD's FidelityFX DLLs (upscalers\\fsr next to the launcher, or [upscale] fsr_dll); "
+                      "XeSS runs on any GPU with DP4a (best on Intel Arc) and needs libxess.dll (upscalers\\xess next to the launcher, or "
+                      "[upscale] xess_dll) and the Visual C++ 2015-2022 runtime. One that cannot run falls back to TAAU and the log names the "
+                      "missing file. Choosing DLSS or XeSS (or Auto with the DLLs present) takes effect at the next start.",
+                      kUpscalerNames, kUpscalerVals, 6);
         const std::string u = lower(ini_now(up));
         if (u == "fsr3")
             ini_combo_row(m, *ini_key("dlss", "sharpness"), "FSR 3 sharpening", nullptr,
@@ -623,7 +624,7 @@ void upscaler_group(Menu& m) {
             row(m, "Frame generation", When::Restart,
                 "One generated frame per rendered frame; the HUD is taken from the real frame. Keep vsync and low latency off. DLSS-G needs "
                 "an RTX 40 or newer GPU, the Streamline DLLs (with the five frame generation adds) and Windows' hardware-accelerated GPU "
-                "scheduling; FSR 3 runs on any GPU and needs amd_fidelityfx_vk.dll v1.1.4 (in upscalers\\fsr of the release package).");
+                "scheduling; FSR 3 runs on any GPU and needs amd_fidelityfx_vk.dll v1.1.4 (in upscalers\\fsr next to the launcher).");
             if (!env_locked(fg)) {
                 std::string v = lower(ini_now(fg));
                 if (v == "1") v = "dlss";
@@ -644,9 +645,10 @@ void upscaler_group(Menu& m) {
                         : extras::framegen_requested()  ? "asked for, not running (see the log)"
                                                         : "off");
     // "found" only when every file the feature needs is there (the log names a missing one)
-    ImGui::TextDisabled(tr("Files found: DLSS %s, DLSS-G %s, FSR 3 upscaling %s, FSR 3 frame generation %s."),
+    ImGui::TextDisabled(tr("Files found: DLSS %s, DLSS-G %s, FSR 3 upscaling %s, FSR 3 frame generation %s, XeSS %s."),
                         extras::temporal_dlss_available() ? "yes" : "no", extras::streamline_framegen_files() ? "yes" : "no",
-                        extras::temporal_ffx_available() ? "yes" : "no", extras::ffx_fg_files() ? "yes" : "no");
+                        extras::temporal_ffx_available() ? "yes" : "no", extras::ffx_fg_files() ? "yes" : "no",
+                        extras::temporal_xess_available() ? "yes" : "no");
     if (extras::framegen_requested() && (m.edit.display.vsync || m.edit.extras.latency.mode != extras::LatencyMode::Off))
         ImGui::TextColored(kOrange, "%s", tr("Frame generation works best with vsync and low latency off (Frame rate tab). With vsync on, the game "
                                              "renders at most half the display's refresh rate."));

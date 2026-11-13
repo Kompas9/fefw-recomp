@@ -169,7 +169,7 @@ UpscaleQuality upscale_quality() {
 
 bool upscale_temporal() {
     const UpscaleMode m = upscale_mode();
-    return m == UpscaleMode::Fsr3 || m == UpscaleMode::Dlss || m == UpscaleMode::Dlaa;
+    return m == UpscaleMode::Fsr3 || m == UpscaleMode::Dlss || m == UpscaleMode::Dlaa || m == UpscaleMode::Xess;
 }
 
 int quality_percent(UpscaleQuality q) {
