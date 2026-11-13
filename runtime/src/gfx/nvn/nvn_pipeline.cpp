@@ -487,6 +487,16 @@ const ProgLayout* prog_layout(const ShaderInfo* const stages[6]) {
                         lbs[0].size(), push_descriptor_max());
         }
         if (ok) sig.append("push0", 5);
+        // a uniform buffer rebind changes nothing outside set 0 unless another set reads a uniform block (a texture handle in one)
+        bool ubo_only = ok;
+        for (const BindingDesc& d : pl.bindings) {
+            if (d.set == 0) continue;
+            const NvnSource src = d.shader->refl.bindings[d.index].nvn.source;
+            if (src == NvnSource::HandleInUniform || src == NvnSource::UniformBlock || src == NvnSource::UniformAsStorage ||
+                src == NvnSource::PushConstants)
+                ubo_only = false;
+        }
+        pl.ubo_only = ubo_only;
     }
     // the pool arrays: the shared layout of kPoolSet (pool_set_layout), whatever arrays the program's stages use
     for (const BindingDesc& d : pl.bindings) pl.has_set[kPoolSet] |= d.set == kPoolSet;
@@ -1382,6 +1392,16 @@ void pool_note_cpu_write(Texture* t) {
 void pool_scan_counts(uint64_t* full_scans, uint64_t* looks) {
     if (full_scans) *full_scans = g_pool_full_scans;
     if (looks) *looks = g_pool_looks;
+}
+
+void pool_registered_textures(std::unordered_set<const Texture*>& out) {
+    for (auto& pp : g_pool_pairs) {
+        TexturePool* tp = pp->tp.get();
+        if (!tp) continue;
+        std::shared_lock<std::shared_mutex> lk(tp->lock);
+        for (const TexturePool::Entry& e : tp->entries)
+            if (e.used && e.tex) out.insert(e.tex.get());
+    }
 }
 
 void pool_texture_remade(Texture* t) {

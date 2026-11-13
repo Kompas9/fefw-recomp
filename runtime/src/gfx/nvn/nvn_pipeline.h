@@ -44,6 +44,9 @@ struct ProgLayout {
     // Set 0 (the uniform buffers) is a push descriptor set ([nvn] push_uniforms): the replay pushes its buffers with each draw that changes
     // them (vkCmdPushDescriptorSetKHR) instead of finding or making a descriptor set for them. Every binding of it is a buffer.
     bool push_set0 = false;
+    // Set 0 is pushed and nothing outside it depends on the uniform buffers (no texture handle read from a uniform block): a draw whose
+    // only change is a uniform buffer binding pushes set 0 again and keeps the other sets it has bound ([nvn] ubo_only_rebind).
+    bool ubo_only = false;
 };
 
 // [nvn] push_uniforms (default true): programs whose set 0 fits the device's push descriptor limit push it (ProgLayout::push_set0). False when the

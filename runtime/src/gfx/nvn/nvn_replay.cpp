@@ -29,6 +29,7 @@
 #include "nxrt/gfx_tuning.h"
 #include "nxrt/log.h"
 #include "api_dlss.h"
+#include "nvn_astc_gpu.h"
 #include "nvn_decoded.h"
 #include "nvn_enums.h"
 #include "nvn_framegen.h"
@@ -36,6 +37,7 @@
 #include "nvn_mask_clear.h"
 #include "nvn_gpu_internal.h"
 #include "nvn_tess_gen.h"
+#include "vk_gauges.h"
 #include "nxrt/lowlat.h"
 #include "extras/hdr_nvn.h"
 #include "extras/fsr1_spatial.h"
@@ -189,10 +191,24 @@ bool g_mask_ready = false, g_mask_ok = false;
 // What changed since the last draw. Ops set bits (mark_dirty); a draw handles and clears the groups it needs. A new submission, a
 // new pass and anything that binds other pipelines sets them all (a new command buffer has no dynamic state, a new pass has other
 // formats and extents).
+// kDescUbo: only uniform buffers (or graphics push constants, which are bound as one) changed; the draw treats it as kDesc unless the
+// uniform-only rebind applies (begin_draw).
 enum : uint32_t {
-    kPipe = 1, kDesc = 2, kVb = 4, kDynVp = 8, kDynRaster = 16, kDynDepth = 32, kDynStencil = 64, kDynBias = 128, kDynBlend = 256, kAllDirty = 0x1ff
+    kPipe = 1, kDesc = 2, kVb = 4, kDynVp = 8, kDynRaster = 16, kDynDepth = 32, kDynStencil = 64, kDynBias = 128, kDynBlend = 256, kDescUbo = 512,
+    kAllDirty = 0x3ff
 };
 uint32_t g_dirty = kAllDirty;
+// The program layout and command buffer of the last draw that bound all its descriptor sets (bind_sets): a uniform-only rebind keeps
+// those sets only while both are still the same.
+const ProgLayout* g_sets_pl = nullptr;
+VkCommandBuffer g_sets_cb = VK_NULL_HANDLE;
+// [nvn] ubo_only_rebind (default true): a draw whose only binding change since the last draw is a uniform buffer pushes set 0 again and
+// keeps the texture and storage sets it has bound, instead of resolving every texture and building every set again. In the Dagsion
+// crowd about 600 of 3,200 draws a frame take it (most of the others change program); the plaza replay went from 4.16 to 3.99 us a draw.
+bool ubo_only_rebind_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "ubo_only_rebind", true);
+    return on;
+}
 // A command may write [addr, addr + size) of pool memory: device-local copies of those pages are stale, and bindings that point at them are
 // made again (vertex buffers and descriptor sets).
 // The ranges of pool memory the GPU writes, with the serial of the submission that did (a ring). The replay records commands: a range written
@@ -346,7 +362,7 @@ std::atomic<bool> g_trace_req{false};   // backend_trace_next_frame(): trace the
 enum RsZone : int { kRsHead, kRsPrep, kRsFb, kRsPass, kRsPipe, kRsDyn, kRsSets, kRsVb, kRsCall, kRsOut, kRsDispatch, kRsAll, kRsAlloc, kRsN };
 struct RStats {
     uint64_t cyc[kRsN] = {};
-    uint64_t draws = 0, draws_desc = 0, draws_pipe = 0, sets = 0, set_hits = 0, set_writes = 0, res_tex = 0, res_img = 0, res_memo = 0;
+    uint64_t draws = 0, draws_desc = 0, draws_ubo = 0, draws_pipe = 0, sets = 0, set_hits = 0, set_writes = 0, res_tex = 0, res_img = 0, res_memo = 0;
     uint64_t binds = 0, binds_same = 0, layouts = 0, keys = 0, dispatches = 0;
     uint64_t miss_first = 0, miss_uboofs = 0, miss_ubo = 0, miss_tex = 0, miss_other = 0;   // set cache misses by what differs from the last set of that layout
 };
@@ -408,7 +424,7 @@ void rs_report() {
             "(%.0f desc, %.0f pipe, %.0f layouts, %.0f keys), %.0f dispatches | per draw us: head %.2f prep %.2f fb %.2f pass %.2f pipe %.2f dyn %.2f "
             "sets %.2f (alloc+update %.2f) vb %.2f call %.2f out %.2f | sets/frame %.0f (%.1f%% cached, %.0f writes) | resolves/frame tex %.0f img %.0f (memo %.0f) | "
             "binds/frame %.0f (%.1f%% same) | set misses/frame: new layout or submission %.0f, only uniform offsets %.0f, only uniform buffers %.0f, "
-            "textures %.0f, other %.0f | pool looks/frame %.1f, full scans/frame %.2f | rt_check %llu checked, %llu mismatches",
+            "textures %.0f, other %.0f | pool looks/frame %.1f, full scans/frame %.2f | rt_check %llu checked, %llu mismatches | uniform-only rebinds/frame %.0f",
             frames, fms(kRsAll), setup, fms(kRsCall), fms(kRsOut), fms(kRsDispatch),
             fms(kRsAll) - setup - fms(kRsCall) - fms(kRsOut) - fms(kRsDispatch), s.draws * pf, s.draws_desc * pf, s.draws_pipe * pf, s.layouts * pf,
             s.keys * pf, s.dispatches * pf, dus(kRsHead), dus(kRsPrep), dus(kRsFb), dus(kRsPass), dus(kRsPipe), dus(kRsDyn), dus(kRsSets), dus(kRsAlloc), dus(kRsVb),
@@ -416,7 +432,7 @@ void rs_report() {
             s.set_writes * pf, s.res_tex * pf, s.res_img * pf, s.res_memo * pf, s.binds * pf,
             s.binds ? 100.0 * static_cast<double>(s.binds_same) / static_cast<double>(s.binds) : 0.0, s.miss_first * pf, s.miss_uboofs * pf,
             s.miss_ubo * pf, s.miss_tex * pf, s.miss_other * pf, static_cast<double>(looks - last_looks) * pf, static_cast<double>(scans - last_scans) * pf,
-            static_cast<unsigned long long>(g_chk_n), static_cast<unsigned long long>(g_chk_bad));
+            static_cast<unsigned long long>(g_chk_n), static_cast<unsigned long long>(g_chk_bad), s.draws_ubo * pf);
     last_scans = scans;
     last_looks = looks;
     last_p = p;
@@ -2576,6 +2592,14 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
     if (!pl) return false;
     MemoScope memo(*pl);
     if (pl->has_set[kPoolSet] && pool_state_moved(S.tpool.get(), S.spool.get())) g_dirty |= kDesc;   // registrations or layout moves since
+    // Only uniform buffers changed: set 0 is pushed again below and the sets this program bound in this command buffer stay (the textures
+    // and storage buffers they hold are what the draw would resolve again). Anything else since then (a bind, a new pass or command
+    // buffer, another program, a feedback loop) takes the full path.
+    bool ubo_fast = false;
+    if (g_dirty & kDescUbo) {
+        ubo_fast = !(g_dirty & kDesc) && pl->ubo_only && pl == g_sets_pl && F->cb == g_sets_cb && !g_fb_seen && ubo_only_rebind_on();
+        if (!ubo_fast) g_dirty |= kDesc;
+    }
     if (extras::temporal_wanted()) temporal_gbuffer_note();
     rs_mark(kRsHead);
     if (g_dirty & (kDesc | kPipe)) {
@@ -2780,9 +2804,25 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
     rs_mark(kRsPipe);
     set_dynamic_state(g_dirty, topo, indexed, index_type);
     rs_mark(kRsDyn);
+    if (ubo_fast) {
+        ++g_rs.draws_ubo;
+        const VkCommandBuffer cb0 = F->cb;
+        g_push0.ready = false;
+        build_set(*pl, 0);                    // leaves set 0's writes in g_push0 (push_set0)
+        if (F->cb == cb0) {
+            if (g_push0.ready && !g_push0.writes.empty())
+                vkCmdPushDescriptorSetKHR(F->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pl->layout, 0, static_cast<uint32_t>(g_push0.writes.size()), g_push0.writes.data());
+            g_push0.ready = false;
+        } else {                              // building it started another command buffer: it has none of the sets, bind them all
+            g_push0.ready = false;
+            g_dirty |= kDesc;
+        }
+    }
     if (g_dirty & kDesc) {
         support_for_draw(*pl, false);
         bind_sets(*pl, VK_PIPELINE_BIND_POINT_GRAPHICS);
+        g_sets_pl = pl;
+        g_sets_cb = F->cb;
     }
     rs_mark(kRsSets);
     if (pl->push_bytes && g_gen_tcs) {
@@ -3806,7 +3846,11 @@ void mark_dirty(const RecordReader& r) {
     }
     switch (r.op()) {
         case Op::BindProgram: g_dirty |= kPipe | kDesc | kVb; break;
-        case Op::BindBuffers: g_dirty |= r.payload<P_BindBuffers>().kind == kBufVertex ? kVb : kDesc; break;
+        case Op::BindBuffers: {
+            const uint32_t kind = r.payload<P_BindBuffers>().kind;
+            g_dirty |= kind == kBufVertex ? kVb : kind == kBufUniform ? kDescUbo : kDesc;
+            break;
+        }
         case Op::BindTextures: case Op::BindImages: case Op::SetTexturePool: case Op::SetSamplerPool: g_dirty |= kDesc; break;
         case Op::BindVertexAttribs: case Op::BindVertexStreams: g_dirty |= kPipe | kVb; break;
         case Op::BindBlend: case Op::BindColor: case Op::BindChannelMask: case Op::BindMultisample: case Op::SetDepthClamp: g_dirty |= kPipe; break;
@@ -4070,7 +4114,7 @@ void run_list(const CmdList& list, int depth) {
                     std::memcpy(S.push_gfx[p.slot & 7] + off, src, n);
                     g_push_buf[p.slot & 7] = UploadAlloc();
                 }
-                g_dirty |= kDesc;
+                g_dirty |= p.compute ? kDesc : kDescUbo;   // graphics push constants are a uniform buffer of set 0 (build_set)
                 break;
             }
             case Op::Dispatch: { RsScope rs(kRsDispatch); ++g_rs.dispatches; const auto& p = r.payload<P_Dispatch>(); do_dispatch(p.x, p.y, p.z, 0); break; }
@@ -4253,6 +4297,34 @@ void run_list(const CmdList& list, int depth) {
 
 }  // namespace
 
+// [diag] load_census (default on): what is alive by kind and size (game pools, their imports and mirrors, texture images, video memory), logged
+// as nvn.census lines when a load starts and 20 s after it ends (the scene has streamed in by then). Once per load: a walk of the live textures
+// and pools on the render thread, a few milliseconds. 2: also hashes the stored bytes of every CPU-filled texture to count duplicate copies
+// (the same asset loaded twice), about a second per census; 0: off.
+enum class CensusEvent { Tick, LoadStart, LoadEnd };
+void load_census(CensusEvent ev, uint64_t present) {
+    static const bool on = nxrt::config_get_int("diag", "load_census", 1) != 0;
+    static uint64_t due = 0;
+    static int loads = 0;
+    if (!on) return;
+    char why[48];
+    if (ev == CensusEvent::LoadEnd) { due = present + 1200; return; }
+    if (ev == CensusEvent::LoadStart) {
+        due = 0;
+        std::snprintf(why, sizeof why, "load start %d", loads + 1);
+    } else {
+        if (!due || present < due) return;
+        due = 0;
+        std::snprintf(why, sizeof why, "loaded %d", ++loads);
+    }
+    log_pool_census(why);
+    log_import_census(why);
+    log_texture_census(why);
+    NXLOG_I("nvn.census", "%s: video memory: images %lld / %.0f MiB, buffers %lld / %.0f MiB (device-local), driver allocations %lld / %.0f MiB",
+            why, static_cast<long long>(nxrt::vk_gauge_images().get()), nxrt::vk_gauge_image_bytes().get() / 1048576.0, static_cast<long long>(nxrt::vk_gauge_buffers().get()),
+            nxrt::vk_gauge_buffer_bytes().get() / 1048576.0, static_cast<long long>(nxrt::vk_gauge_memory_allocs().get()), nxrt::vk_gauge_memory_bytes().get() / 1048576.0);
+}
+
 // [display] unpaced_loading (default on): the limiter stops waiting while the game loads, since its loading code advances once per
 // presented frame. Loading = presented frames with fewer than 16 draws (boot's black screen draws 3: exposure, bloom, tone map; the
 // loading screen a few more) AND the game still stalling: a present gap over 100 ms in the last 1.5 s. A light screen that presents
@@ -4280,7 +4352,9 @@ void note_frame_for_pacing() {
         ft::mark(want ? "pace.loading" : "pace.playing", static_cast<uint32_t>(per));
         NXLOG_I(kTag, "pacing %s (present %llu, %llu draws)", want ? "off: loading" : "on", static_cast<unsigned long long>(p),
                 static_cast<unsigned long long>(per));
+        load_census(want ? CensusEvent::LoadStart : CensusEvent::LoadEnd, p);
     }
+    load_census(CensusEvent::Tick, p);
     static bool full = false;
     if (!full && per >= 16) {
         full = true;
@@ -4346,6 +4420,7 @@ void replay_begin_submit(Frame& f) {
         g_pass_unsafe = false;
         mirror_begin_submit(f, on);
     }
+    if (astc_gpu_work()) astc_gpu_pump(f);   // [gfx] astc_gpu: textures queued over an earlier present's budget (once per present; no pass is open yet)
     S.window_origin = window_origin_mode();
     S.depth_mode = depth_mode();
     g_draw_idx = 0;
@@ -4354,6 +4429,8 @@ void replay_begin_submit(Frame& f) {
     g_bound_pipeline = VK_NULL_HANDLE;
     g_dirty = kAllDirty;
     g_pl = nullptr;
+    g_sets_pl = nullptr;
+    g_sets_cb = VK_NULL_HANDLE;
     g_pipe = VK_NULL_HANDLE;
     g_topo = g_pipe_topo = VK_PRIMITIVE_TOPOLOGY_MAX_ENUM;
     g_restart_valid = false;
