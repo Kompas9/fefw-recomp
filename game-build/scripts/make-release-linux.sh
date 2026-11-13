@@ -136,7 +136,7 @@ find "$PKG/tools/python" -type l -print0 | while IFS= read -r -d '' l; do
 done
 links=$(find "$PKG" -type l)
 [ -z "$links" ] || { echo "symbolic links in the package:"; echo "$links"; exit 1; } >&2
-"$PKG/tools/python/bin/python3" -I -c "import zbic, lz4, capstone, zstandard"
+"$PKG/tools/python/bin/python3" -I -B -c "import zbic, lz4, capstone, zstandard"   # -B: no __pycache__ (it would carry this machine's paths)
 cp "$PKG/tools/python/lib/python$PYTHON_MINOR/LICENSE.txt" "$PKG/licenses/LICENSE.Python.PSF.txt"
 
 echo "--- checks"
