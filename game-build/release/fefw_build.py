@@ -418,22 +418,36 @@ def compile_all(runner, gen, obj, jobs, env, variant):
     # a big unit takes a GB or two in clang; with too many at once memory runs out and clang dies on every unit with
     # exit 541541187 (0x20474343: an uncaught C++ exception, std::bad_alloc)
     # ponytail: 2 GiB per job is a guess from the unit sizes; measure if machines with plenty of RAM get capped
-    avail = free_memory()
-    if avail:
-        jobs = max(1, min(jobs, avail // (2 << 30)))
+    # The free memory is looked at again before every start, not once at the beginning: a player who closes a browser while the
+    # build runs gets the extra jobs, and one who opens something big gets fewer new ones (running jobs are never stopped).
+    # At most one job is started per second, because a job that just started has not taken its memory yet.
+    per_job = 2 << 30
     failed = []
+    queue = list(todo)
+    limited = False                      # the last start was held back by low memory
     with ThreadPoolExecutor(max_workers=jobs) as ex:
-        pending = {ex.submit(one, t): t for t in todo}
+        pending = {}
         try:
-            while pending:
-                fin, _ = wait(pending, return_when=FIRST_COMPLETED)
+            while queue or pending:
+                if queue and len(pending) < jobs:
+                    avail = free_memory()
+                    held = bool(pending) and avail is not None and avail < per_job    # one job always runs, whatever the memory
+                    if not held:
+                        t = queue.pop(0)
+                        pending[ex.submit(one, t)] = t
+                    if held != limited:
+                        limited = held
+                        progress('compile', done, total, 'Compiling: %d of %d%s' % (done, total, ' (free memory is low, %d at a time)' % len(pending) if limited else ''))
+                # wake up soon to look at the memory again while jobs are held back or can still be added
+                room = bool(queue) and len(pending) < jobs
+                fin, _ = wait(pending, timeout=1.0 if room else None, return_when=FIRST_COMPLETED)
                 for f in fin:
                     t = pending.pop(f)
                     if f.result():
                         failed.append(t)
                         continue
                     done += 1
-                    progress('compile', done, total, 'Compiling: %d of %d' % (done, total))
+                    progress('compile', done, total, 'Compiling: %d of %d%s' % (done, total, ' (free memory is low, %d at a time)' % max(1, len(pending)) if limited else ''))
         except BaseException:
             for f in pending:
                 f.cancel()
