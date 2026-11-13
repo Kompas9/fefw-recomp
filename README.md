@@ -1,5 +1,13 @@
 # fefw-recomp
 
+> This will probably be the final update.
+>
+> I started this project to play a game I really like in the best way possible, and it's grown into a lot more than that. To everyone who had a smooth experience: I'm glad you enjoyed it. To anyone who ran into crashes or other problems: every release tried to improve on that, this one most of all. But this is a heavy game to run, and complete compatibility and perfect optimization are an uphill battle.
+>
+> Thanks to everyone who filed issues, sent contributions and helped test.
+>
+> I'll be deleting this repo soon. Anyone is free to continue the work.
+
 A native Windows PC port of **Fire Emblem: Fortune's Weave** (Nintendo Switch 2), made by static recompilation. The game's code is
 translated to C++ and compiled into a regular Windows program, which runs on a small runtime that stands in for the console's system
 software and draws with Vulkan. It is not an emulator.
