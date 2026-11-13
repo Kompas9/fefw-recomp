@@ -11,6 +11,7 @@
 // from the harness's results.tsv (apply_harness).
 #include "nvn_shaders.h"
 #include "nvn_spirv_patch.h"
+#include "nvn_residency.h"
 
 #include <windows.h>
 
@@ -871,6 +872,8 @@ bool move_pool_arrays(std::vector<uint32_t>& w, ShaderReflection& refl, std::str
     std::sort(refl.bindings.begin(), refl.bindings.end(), [](const DescriptorBinding& a, const DescriptorBinding& b) {
         return a.set != b.set ? a.set < b.set : a.binding < b.binding;
     });
+    // [gfx] residency: the pool texture indexes mark what they sample (nvn_residency.h); a module that cannot be marked keeps its words
+    if (gpu::residency_on() && !gpu::spirv_pool_feedback(w)) gpu::residency_unmarked();
     return true;
 }
 

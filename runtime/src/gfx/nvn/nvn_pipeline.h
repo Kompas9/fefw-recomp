@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <shared_mutex>
 #include <string>
 #include <vector>
 
@@ -237,7 +238,15 @@ inline std::atomic<int>& compiles_in_flight() {
 void configure_guest_subgroup(VkPipelineShaderStageCreateInfo& stage,
                               VkPipelineShaderStageRequiredSubgroupSizeCreateInfo& size);
 
+// Intel's Windows driver (igvk64.dll) faulted inside vkGetPipelineCacheData on the cache-save thread while combat compiled new pipelines
+// into the same cache (#124), although the spec makes the cache internally synchronized. With [nvn] pipeline_cache_lock on (auto: Intel
+// GPUs only) compiles into the shared cache hold this shared and the save holds it exclusively; elsewhere it is not taken.
+std::shared_mutex& pipeline_cache_mutex();
+bool pipeline_cache_locked();
+
 inline VkResult create_graphics_pipeline_tracked(VkDevice dev, VkPipelineCache cache, const VkGraphicsPipelineCreateInfo* gi, VkPipeline* out) {
+    std::shared_lock<std::shared_mutex> cache_lk;
+    if (cache != VK_NULL_HANDLE && pipeline_cache_locked()) cache_lk = std::shared_lock<std::shared_mutex>(pipeline_cache_mutex());
     compiles_in_flight().fetch_add(1, std::memory_order_relaxed);
     const uint64_t t0 = nxrt::hitch_ticks();
     // Centralised here so whole pipelines, GPL parts and prewarm workers agree.

@@ -202,6 +202,8 @@ size_t pick_gpu(const std::vector<GpuCandidate>& gpus, const char* want, bool* m
 
 // ---- private state ----------------------------------------------------------------------------------------------------
 struct Device::Impl {
+    std::mutex small_pools_mu;                       // ImageDesc::small_pool: one VMA pool of 16 MiB blocks per memory type
+    std::map<uint32_t, VmaPool> small_pools;
     // validation counters (written from any thread by the layer callback)
     std::atomic<uint64_t> errors{0}, warnings{0}, infos{0}, verbose{0};
     std::mutex first_error_mu;
@@ -457,6 +459,30 @@ int video_usage_percent() {
             VmaBudget b[VK_MAX_MEMORY_HEAPS] = {};
             vmaGetHeapBudgets(g_guard_vma, b);
             if (b[g_video_heap].budget) pct = static_cast<int>(b[g_video_heap].usage * 100 / b[g_video_heap].budget);
+        }
+    }
+    last.store(pct, std::memory_order_relaxed);
+    return pct;
+}
+
+// [gfx] residency: this process' use of the budget less the room free inside VMA's blocks (what a freed image gives back stays in its
+// block for the next allocation), in percent; -1 when not known. Sampled at most every 250 ms.
+int video_live_percent() {
+    static std::atomic<int64_t> next_ms{0};
+    static std::atomic<int> last{-1};
+    const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    int64_t due = next_ms.load(std::memory_order_relaxed);
+    if (now < due || !next_ms.compare_exchange_strong(due, now + 250, std::memory_order_relaxed)) return last.load(std::memory_order_relaxed);
+    int pct = -1;
+    {
+        std::lock_guard<std::mutex> lk(g_guard_mu);
+        if (g_guard_vma && g_video_heap >= 0) {
+            VmaBudget b[VK_MAX_MEMORY_HEAPS] = {};
+            vmaGetHeapBudgets(g_guard_vma, b);
+            const VmaBudget& h = b[g_video_heap];
+            const uint64_t free_in_blocks = h.statistics.blockBytes > h.statistics.allocationBytes ? h.statistics.blockBytes - h.statistics.allocationBytes : 0;
+            const uint64_t live = h.usage > free_in_blocks ? h.usage - free_in_blocks : 0;
+            if (h.budget) pct = static_cast<int>(live * 100 / h.budget);
         }
     }
     last.store(pct, std::memory_order_relaxed);
@@ -1029,6 +1055,9 @@ Device::~Device() {
     unregister_vma_gauges();   // before the allocator goes: the gauges read it (the registry lock makes this wait for a running read)
     extras::framegen_shutdown(this);
     extras::xess_shutdown();   // the XeSS context holds device memory
+    if (impl_ && vma_)
+        for (auto& [mt, pool] : impl_->small_pools)
+            if (pool) vmaDestroyPool(vma_, pool);
     if (vma_) vmaDestroyAllocator(vma_);
     extras::streamline_shutdown();
     if (device_) vkDestroyDevice(device_, nullptr);
@@ -1144,6 +1173,21 @@ VkResult Device::create_image(const ImageDesc& d, Image* out, std::string* why) 
     // VK_EXT_memory_priority (used for a dedicated allocation; ignored without the extension): what is rendered to stays in video memory
     // before what is only sampled. Zero, the default, would make every large image the first to go.
     ai.priority = (d.usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) ? 1.0f : 0.5f;
+    if (d.small_pool) {
+        uint32_t mt = 0;
+        if (vmaFindMemoryTypeIndexForImageInfo(vma_, &ci, &ai, &mt) == VK_SUCCESS) {
+            std::lock_guard<std::mutex> lk(impl_->small_pools_mu);
+            VmaPool& pool = impl_->small_pools[mt];
+            if (!pool) {
+                VmaPoolCreateInfo pci = {};
+                pci.memoryTypeIndex = mt;
+                pci.blockSize = 16ull << 20;
+                pci.priority = 0.5f;
+                if (vmaCreatePool(vma_, &pci, &pool) != VK_SUCCESS) pool = nullptr;
+            }
+            ai.pool = pool;
+        }
+    }
     Image img;
     VkImage handle = VK_NULL_HANDLE;
     VmaAllocation alloc = nullptr;

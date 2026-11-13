@@ -49,6 +49,7 @@
 #include "nxrt/haptic.h"
 #include "nxrt/platform.h"
 #include "nxrt/render_status.h"
+#include "play_selftest.h"   // play::exit_process (Quit game)
 #include "play_types.h"
 #include "play_ui.h"
 
@@ -1483,6 +1484,19 @@ void settings_menu(play::UiHost& host, gfx::Overlay& ov) {
         }
         const char* close = tr("Close");
         const float bw = ImGui::CalcTextSize(close).x + ImGui::GetStyle().FramePadding.x * 6;
+        // Quit game (#72): the same exit as the window's close button (settings saved, caches flushed, exit code 0). Two clicks, so a
+        // slip on the way to Close does not end the session.
+        static double quit_armed_until = 0;
+        const bool quit_armed = ImGui::GetTime() < quit_armed_until;
+        const char* quit_ask = tr("Click again to quit");
+        const char* quit_idle = tr("Quit game");
+        const float qw = std::max(ImGui::CalcTextSize(quit_ask).x, ImGui::CalcTextSize(quit_idle).x) + ImGui::GetStyle().FramePadding.x * 6;
+        ImGui::SameLine(ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x - bw - ImGui::GetStyle().ItemSpacing.x - qw);
+        const std::string quit_label = std::string(quit_armed ? quit_ask : quit_idle) + "###fefw_quit";
+        if (ImGui::Button(quit_label.c_str(), ImVec2(qw, 0))) {
+            if (quit_armed) play::exit_process(0, "pass", "quit from the F1 menu");
+            quit_armed_until = ImGui::GetTime() + 4.0;
+        }
         ImGui::SameLine(ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x - bw);
         if (ImGui::Button(close, ImVec2(bw, 0))) ov.request_hide();
     }

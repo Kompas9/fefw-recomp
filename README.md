@@ -76,6 +76,12 @@ set it under **Settings > Picture > DLSS (Streamline) folder**.
 For DLSS frame generation (RTX 40 or newer, with Windows' hardware-accelerated GPU scheduling on) add five more files from the same
 folder: `sl.dlss_g.dll`, `sl.reflex.dll`, `sl.pcl.dll`, `nvngx_dlssg.dll` and `NvLowLatencyVk.dll`.
 
+On an RTX 30 or older GPU, NVIDIA's own files refuse frame generation. Some community mods replace some of these files to run it on
+older GPUs. We don't ship or support them. If you use one, put its files in the same `upscalers\streamline` folder, replacing the
+originals as the mod says, and set `frame_gen_any_gpu = 1` under `[dlss]` in `fefw.ini` in the run folder (or the environment
+variable `NXRT_DLSS_FRAME_GEN_ANY_GPU=1`). The game then no longer turns frame generation off just because Streamline says the GPU
+is too old, and the mod's own answer decides. `fefw.log` shows the outcome on its `framegen` and `dlss` lines.
+
 ### FSR 3 (any GPU)
 
 FSR 3 needs AMD's signed FidelityFX files, which you download from AMD's
@@ -121,7 +127,8 @@ key and they show keys, touch the controller and they show its buttons. The keyb
 | V / B | Left / right stick click | |
 
 The movement keys push the stick all the way. **F1** (settings), **F2** (frame rate counter) and **Alt+Enter** (full screen) are
-the runtime's own keys. **F1 > Controls** lists the keys as they are now.
+the runtime's own keys. **F1 > Controls** lists the keys as they are now. To leave the game cleanly, use **Quit game** at the
+bottom of the F1 menu (click it twice) or close the window (**Alt+F4**): both save the settings and end the game normally.
 
 To change a key, close the game and edit `[bindings.all]` in `controls.ini` in the run folder (the game creates it on its first
 start). Each line is `key = action`:

@@ -39,6 +39,7 @@
 #include "nvn_enums.h"
 #include "nvn_format.h"
 #include "nvn_gpu_internal.h"
+#include "nvn_residency.h"
 #include "extras/hdr_nvn.h"
 #include "nvn_astc_gpu.h"
 #include "nvn_texdata.h"
@@ -53,6 +54,12 @@ namespace nxrt::nvn::be {
 // The Vulkan side of a texture: Texture::gpu points to it (created by gpu::tex_gpu, freed by gpu::tex_destroy).
 static std::mutex g_live_mu;
 static std::set<struct TexGpu*> g_live_set;
+
+// [gfx] residency: milliseconds since the start (wraps after 49 days; only differences are used)
+uint32_t resid_ms() {
+    static const auto t0 = std::chrono::steady_clock::now();
+    return static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count()) + 1;
+}
 
 struct TexGpu {
     bool promoted = false;                              // HDR scene pipeline: an 8-bit sRGB render target kept as RGBA16F (src/gfx/extras/hdr_nvn.h)
@@ -80,6 +87,8 @@ struct TexGpu {
     bool scale_blocked = false;                         // was scaled, brought back to 1 (bound as a storage image, or paired with an unscaled target)
     std::map<std::array<uint32_t, 12>, VkImageView> views;
     std::map<VkFormat, bool> sampled_formats;
+    VkFormat last_sampled_fmt = VK_FORMAT_MAX_ENUM;     // sampled_formats' last answer (render thread, [nvn] lean_draws)
+    bool last_sampled_ok = false;
     std::array<uint32_t, 12> last_key = {};             // view_for's last answer (render thread): most lookups repeat it (rt agent)
     VkImageView last_view = VK_NULL_HANDLE;
     int refs = 1;                                      // texture objects over the same storage share one image (render thread)
@@ -93,6 +102,10 @@ struct TexGpu {
     // draw last asked for a sampled view of it
     uint64_t est_bytes = 0, est_native_bytes = 0;
     std::atomic<uint32_t> sampled_at{0};                // present count + 1 at the last tex_sampled_view; 0: never
+    // [gfx] residency (nvn_residency.h): when a draw last used it (a binding's view, a shader's pool mark; resid_ms clock), and when
+    // tex_demote shrank it (0: whole)
+    std::atomic<uint32_t> seen_ms{0};
+    uint32_t demoted_ms = 0;
 };
 
 // A virtual-pool texture too big to back fully (Mario Kart World's terrain virtual texture caches: 8192x8192 arrays of 68 layers, 1.4 to
@@ -709,6 +722,7 @@ TexGpu* create_texture_gpu(Texture* t, float want_scale) {
     g->levels = s.levels;
     g->layers = s.layers;
     g->cube = s.cube;
+    g->seen_ms.store(resid_ms(), std::memory_order_relaxed);   // [gfx] residency: a new image counts as used
     auto fail = [&](const std::string& why) -> TexGpu* {
         NXLOG_E(kTag, "texture %u: no image (%s): the texture is not usable on the GPU", t->id, why.c_str());
         g->failed = true;
@@ -1732,6 +1746,288 @@ bool tex_rescale(Texture* t, Frame& f, float to, const char* why) {
     return true;
 }
 
+// ---- [gfx] residency: demotion and promotion (nvn_residency.h) ---------------------------------------------------------------------
+namespace {
+nxrt::GaugeCounter g_gauge_demoted("nvn.resid.demoted");          // textures held demoted now
+nxrt::GaugeCounter g_gauge_demoted_mb("nvn.resid.demoted_mb");    // estimated video memory those gave back
+nxrt::GaugeCounter g_gauge_demotions("nvn.resid.demotions");      // cumulative
+nxrt::GaugeCounter g_gauge_promotions("nvn.resid.promotions");    // cumulative
+struct Demoted {
+    Ref<Texture> t;
+    const TexGpu* g;      // the image demoted (a texture remade since, by a release or a retry, is no longer ours to promote)
+    uint64_t saved;       // estimated bytes given back
+    uint64_t full;        // estimated bytes of the whole image (what a restore uploads and transcodes again)
+    uint32_t want_ms;     // resid_ms when it was first seen again after its demotion (0: not wanted yet)
+};
+std::vector<Demoted> g_demoted;
+
+struct ResidCfg {
+    int percent, idle_s, dim, urgent_percent, urgent_idle_s;
+    int restore_max, restore_mb, catchup_ms;   // tex_residency_restore's budget per present, and when a backlog gets 4x it
+};
+const ResidCfg& resid_cfg() {
+    static const ResidCfg c = [] {
+        ResidCfg r;
+        r.percent = static_cast<int>(std::clamp<int64_t>(nxrt::config_get_int("gfx", "residency_percent", 80), 10, 100));
+        r.idle_s = static_cast<int>(std::clamp<int64_t>(nxrt::config_get_int("gfx", "residency_idle_s", 60), 1, 86400));
+        r.dim = static_cast<int>(std::clamp<int64_t>(nxrt::config_get_int("gfx", "residency_dim", 256), 4, 16384));
+        r.urgent_percent = std::max(r.percent, 92);
+        r.urgent_idle_s = std::min(r.idle_s, 10);
+        r.restore_max = static_cast<int>(std::clamp<int64_t>(nxrt::config_get_int("gfx", "residency_restore_max", 8), 1, 1024));
+        r.restore_mb = static_cast<int>(std::clamp<int64_t>(nxrt::config_get_int("gfx", "residency_restore_mb", 8), 1, 4096));
+        r.catchup_ms = static_cast<int>(std::clamp<int64_t>(nxrt::config_get_int("gfx", "residency_restore_catchup_ms", 2000), 100, 600000));
+        return r;
+    }();
+    return c;
+}
+
+// A whole image the CPU filled (the GPU never drew it: its texels are in the game's memory), sampled, alone on its storage, 2D, with
+// levels to give back.
+bool demotable(const Texture* t, const TexGpu* g) {
+    if (!g || g->failed || g->sparse || g->refs != 1 || g->depth || g->gpu_written || !g->uploaded || g->streamed || g->promoted || g->presented ||
+        g->scale != 1.0f || g->demoted_ms || g->type != VK_IMAGE_TYPE_2D || g->levels < 2 || g->est_bytes < (256u << 10))
+        return false;
+    if (g->layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL || !(g->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) || !(g->usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT))
+        return false;
+    if (!t->mem || t->overflow || t->is_display || t->vpool || t->b.samples > 1 || t->destroyed.load(std::memory_order_relaxed) || t->cpu_dirty.load())
+        return false;
+    const uint32_t gen = t->prep_gen.load(std::memory_order_relaxed);
+    if (t->prep_prov.load(std::memory_order_relaxed) == (0x80000000u | gen)) return false;   // a quick stand-in waiting for its final texels
+    return std::max(g->base.width, g->base.height) > static_cast<uint32_t>(resid_cfg().dim);
+}
+
+// Remakes the image from its smaller levels (the largest at most residency_dim a side), copied over on the GPU. The larger levels count as
+// dropped (TexGpu::drop), like [gfx] texture_detail's: views, uploads and copies already take that into account.
+uint64_t tex_demote(Texture* t, TexGpu* g, Frame& f) {
+    uint32_t k = 0;
+    while (k + 1 < g->levels && std::max(level_extent(g->base, k).width, level_extent(g->base, k).height) > static_cast<uint32_t>(resid_cfg().dim)) ++k;
+    if (k == 0) return 0;
+    Shape s = shape_of(*t);
+    Shape ns = s;
+    ns.base = level_extent(g->base, k);
+    ns.levels = g->levels - k;
+    ns.layers = g->layers;
+    gfx::Image ni;
+    std::string err;
+    gfx::ImageDesc nd = make_desc(ns, g->format, g->usage, base_flags(s, g->format));
+    nd.small_pool = true;   // not in the room the whole images leave: their blocks can empty and go back to the OS
+    if (device().create_image(nd, &ni, &err) != VK_SUCCESS) return 0;
+    move_layout(f, *g, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    image_barrier(f.cb, ni.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, g->aspect, 0, ns.levels, 0, ns.layers);
+    std::vector<VkImageCopy> regions;
+    for (uint32_t j = 0; j < ns.levels; ++j) {
+        VkImageCopy r = {};
+        r.srcSubresource = {g->aspect, k + j, 0, ns.layers};
+        r.dstSubresource = {g->aspect, j, 0, ns.layers};
+        r.extent = level_extent(g->base, k + j);
+        r.extent.depth = 1;
+        regions.push_back(r);
+    }
+    vkCmdCopyImage(f.cb, g->img.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, ni.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, static_cast<uint32_t>(regions.size()),
+                   regions.data());
+    gfx::Image old = g->img;
+    std::vector<VkImageView> views;
+    for (auto& kv : g->views) views.push_back(kv.second);
+    g->views.clear();
+    g->last_view = VK_NULL_HANDLE;
+    g->last_key = {};
+    defer_destroy([old, views]() mutable {
+        for (VkImageView v : views) { vkDestroyImageView(vkdev(), v, nullptr); vk_gauge_image_views().sub(1); }
+        device().destroy_image(old);
+    });
+    g->img = ni;
+    g->base = ns.base;
+    g->levels = ns.levels;
+    g->drop += k;
+    g->layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    move_layout(f, *g, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    const uint64_t before = g->est_bytes;
+    g->est_bytes = std::max<uint64_t>(before >> (2 * k), 1);
+    g->est_native_bytes >>= 2 * k;
+    g->demoted_ms = resid_ms();
+    pool_texture_remade(t);
+    return before - g->est_bytes;
+}
+
+// Makes a demoted texture whole again: a new image, filled from the game's memory as at its first use; the small one goes after the frames
+// that use it.
+bool tex_promote(Texture* t, Frame& f) {
+    TexGpu* old = t->gpu;
+    if (!old || old->refs != 1) return false;
+    t->gpu = nullptr;
+    TexGpu* ng = create_texture_gpu(t, 1.0f);
+    if (ng->failed) {   // no memory for it now: keep the small one, try again at the next look
+        t->gpu = old;
+        destroy_texture_gpu(ng);
+        counters().textures_failed.fetch_sub(1);
+        return false;
+    }
+    tex_ensure_current(t, f);
+    pool_texture_remade(t);
+    destroy_texture_gpu(old);
+    return true;
+}
+}  // namespace
+
+void tex_mark_seen(Texture* t) {
+    if (t && t->gpu && !t->gpu->failed) t->gpu->seen_ms.store(resid_ms(), std::memory_order_relaxed);
+}
+
+void tex_residency_tick(Frame& f) {
+    // Images that failed for want of video memory: a texture the pool arrays sample is only made again when its id is written again, which
+    // nothing did, so it stayed the black dummy for good (every texture black after a while over the budget). Remade here once its wait is
+    // over (tex_or_null writes its ids again).
+    if (counters().textures_failed.load(std::memory_order_relaxed) > 0) {
+        const uint32_t pnow = static_cast<uint32_t>(counters().presents.load(std::memory_order_relaxed));
+        std::unordered_set<const Texture*> reg;
+        pool_registered_textures(reg);
+        int n = 0;
+        for (const Texture* ct : reg) {
+            const TexGpu* g = ct->gpu;
+            if (!g || !g->failed || !g->retry_at || static_cast<int32_t>(pnow - g->retry_at) < 0) continue;
+            if (n++ >= 64) break;
+            if (tex_or_null(const_cast<Texture*>(ct))) pool_note_cpu_write(const_cast<Texture*>(ct));   // its draws upload it
+        }
+    }
+    if (!residency_on()) return;
+    const ResidCfg& cfg = resid_cfg();
+    const uint32_t now = resid_ms();
+    // promotions: tex_residency_restore, every present
+    if (!residency_marks_complete()) return;
+    // demotions: over residency_percent of the OS budget, the textures no draw used for residency_idle_s, the longest unused first, until
+    // the use is 5 points under it (at most 512 MiB a look); over 92%, ten seconds unused is enough
+    int pct = nxrt::gfx::video_live_percent();   // the room free inside VMA's blocks is not pressure: the next images go there
+    uint64_t budget = nxrt::gfx::video_budget_bytes();
+    if (pct < 0 || !budget) return;
+    static const uint64_t test_mb = static_cast<uint64_t>(std::max<int64_t>(0, nxrt::config_get_int("gfx", "residency_test_budget_mb", 0)));
+    if (test_mb && (test_mb << 20) < budget) {   // test aid: a smaller card's budget (the use stays this process' real one)
+        pct = static_cast<int>(budget / 100 * static_cast<uint64_t>(pct) / ((test_mb << 20) / 100));
+        budget = test_mb << 20;
+    }
+    if (pct < cfg.percent) return;
+    const bool urgent = pct >= cfg.urgent_percent;
+    const uint32_t idle_ms = static_cast<uint32_t>(urgent ? cfg.urgent_idle_s : cfg.idle_s) * 1000u;
+    const uint64_t want = std::min<uint64_t>(budget / 100 * static_cast<uint64_t>(pct - cfg.percent + 5), 512ull << 20);
+    std::unordered_set<const Texture*> reg;
+    pool_registered_textures(reg);
+    std::vector<std::pair<uint32_t, Texture*>> cand;
+    for (const Texture* ct : reg) {
+        Texture* t = const_cast<Texture*>(ct);
+        const TexGpu* g = t->gpu;
+        if (!demotable(t, g)) continue;
+        const uint32_t age = now - g->seen_ms.load(std::memory_order_relaxed);
+        if (age < idle_ms || age > 0x80000000u) continue;
+        cand.emplace_back(age, t);
+    }
+    std::sort(cand.begin(), cand.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+    uint64_t freed = 0;
+    int n = 0;
+    for (auto& [age, t] : cand) {
+        if (freed >= want || n >= 400) break;
+        const uint64_t saved = tex_demote(t, t->gpu, f);
+        if (!saved) continue;
+        freed += saved;
+        ++n;
+        g_demoted.push_back({Ref<Texture>::share(t), t->gpu, saved, saved + t->gpu->est_bytes, 0});
+        g_gauge_demoted.add(1);
+        g_gauge_demoted_mb.add(static_cast<int64_t>(saved >> 20));
+        g_gauge_demotions.add(1);
+    }
+    static int logged = 0;
+    if (n && (logged++ < 40 || logged % 50 == 0))
+        NXLOG_I(kTag, "residency: video memory at %d%% of the %.2f GiB budget: %d textures unused for %u s and more demoted (%.0f MB given back; %zu demoted "
+                      "in all, %d of %zu candidates)%s", pct, static_cast<double>(budget) / (1024.0 * 1024.0 * 1024.0), n, idle_ms / 1000,
+                static_cast<double>(freed) / (1024.0 * 1024.0), g_demoted.size(), n, cand.size(), urgent ? " [urgent]" : "");
+}
+
+// Once per present: the demoted textures a draw used again (everything once the marks are incomplete) are made whole, the most recently
+// sampled first (what is on screen), within [gfx] residency_restore_max textures and residency_restore_mb MiB of whole images a present
+// (a restore uploads the whole image again on this thread, 0.7 to 2 ms a texture measured, and transcodes it on the GPU, about 1 ms a MiB
+// of BC7: 128 at once made 200 ms frames, 16 MiB a present still left the GPU behind after a burst; 8 MiB matches [gfx] astc_gpu_ms's
+// share). At least one goes every present; when one has waited residency_restore_catchup_ms the budget is four times as big.
+void tex_residency_restore(Frame& f) {
+    if (g_demoted.empty()) return;
+    const ResidCfg& cfg = resid_cfg();
+    const uint32_t now = resid_ms();
+    static uint32_t hold_until = 0;   // a restore found no memory: wait a second before the next try
+    const bool complete = residency_marks_complete();
+    std::vector<std::pair<uint32_t, size_t>> want;   // (seen_ms, index in g_demoted)
+    uint32_t longest = 0;
+    for (size_t i = 0; i < g_demoted.size();) {
+        Demoted& d = g_demoted[i];
+        Texture* t = d.t.get();
+        const TexGpu* g = t->gpu;
+        if (g != d.g || t->destroyed.load(std::memory_order_relaxed)) {   // remade or released meanwhile: no longer demoted by us
+            g_gauge_demoted.sub(1);
+            g_gauge_demoted_mb.sub(static_cast<int64_t>(d.saved >> 20));
+            d = std::move(g_demoted.back());
+            g_demoted.pop_back();
+            continue;
+        }
+        const uint32_t seen = g->seen_ms.load(std::memory_order_relaxed);
+        if (!complete || static_cast<int32_t>(seen - g->demoted_ms) > 0) {
+            if (!d.want_ms) d.want_ms = now;
+            longest = std::max(longest, now - d.want_ms);
+            want.emplace_back(seen, i);
+        }
+        ++i;
+    }
+    // what a restore costs, logged every 10 s while restores happen
+    static uint64_t st_n = 0, st_bytes = 0, st_us = 0, st_wait_ms = 0;
+    static uint32_t st_worst_us = 0, st_worst_wait = 0, st_last = 0, st_frames = 0, st_catchup = 0;
+    size_t waiting = want.size();
+    if (!want.empty() && static_cast<int32_t>(now - hold_until) >= 0) {
+        std::sort(want.begin(), want.end(), [](const auto& a, const auto& b) { return static_cast<int32_t>(a.first - b.first) > 0; });
+        const bool catchup = longest >= static_cast<uint32_t>(cfg.catchup_ms);
+        const int max_n = cfg.restore_max * (catchup ? 4 : 1);
+        const uint64_t max_bytes = (static_cast<uint64_t>(cfg.restore_mb) << 20) * (catchup ? 4 : 1);
+        const auto t0 = std::chrono::steady_clock::now();
+        std::vector<size_t> done;
+        uint64_t bytes = 0;
+        for (const auto& [seen, i] : want) {
+            Demoted& d = g_demoted[i];
+            if (static_cast<int>(done.size()) >= max_n || (!done.empty() && bytes + d.full > max_bytes)) break;
+            if (!tex_promote(d.t.get(), f)) {
+                hold_until = now + 1000;
+                break;
+            }
+            bytes += d.full;
+            const uint32_t waited = now - d.want_ms;
+            st_wait_ms += waited;
+            st_worst_wait = std::max(st_worst_wait, waited);
+            g_gauge_promotions.add(1);
+            done.push_back(i);
+        }
+        if (!done.empty()) {
+            const uint32_t us = static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count());
+            st_n += done.size();
+            st_bytes += bytes;
+            st_us += us;
+            st_worst_us = std::max(st_worst_us, us);
+            ++st_frames;
+            st_catchup += catchup ? 1 : 0;
+        }
+        waiting -= done.size();
+        std::sort(done.begin(), done.end(), std::greater<size_t>());   // swap-remove from the back first: the indexes stay valid
+        for (size_t i : done) {
+            g_gauge_demoted.sub(1);
+            g_gauge_demoted_mb.sub(static_cast<int64_t>(g_demoted[i].saved >> 20));
+            g_demoted[i] = std::move(g_demoted.back());
+            g_demoted.pop_back();
+        }
+    }
+    if (st_n && now - st_last >= 10000) {
+        NXLOG_I(kTag, "residency: %llu textures restored (%.0f MB) in %u presents, %.2f ms each on average, worst present %.1f ms; waited %.0f ms on "
+                      "average, %u ms at most; %zu waiting now; %u presents at the catch-up budget",
+                static_cast<unsigned long long>(st_n), static_cast<double>(st_bytes) / (1024.0 * 1024.0), st_frames,
+                static_cast<double>(st_us) / 1000.0 / static_cast<double>(st_n), st_worst_us / 1000.0,
+                static_cast<double>(st_wait_ms) / static_cast<double>(st_n), st_worst_wait, waiting, st_catchup);
+        st_n = st_bytes = st_us = st_wait_ms = 0;
+        st_worst_us = st_worst_wait = st_frames = st_catchup = 0;
+        st_last = now;
+    }
+}
+
 void tex_poll_cpu_writes() {
     if (!g_tex_ww) return;
     g_tex_ww_pages.clear();
@@ -2206,6 +2502,7 @@ VkImageView tex_sampled_view(Texture* t, const ViewRequest& req) {
     TexGpu* g = tex_or_null(t);
     if (!g) return VK_NULL_HANDLE;
     g->sampled_at.store(static_cast<uint32_t>(counters().presents.load(std::memory_order_relaxed)) + 1, std::memory_order_relaxed);
+    if (!g_resid_pool_view) g->seen_ms.store(resid_ms(), std::memory_order_relaxed);   // a binding's view is a use; a pool descriptor is not
     const bool is3d = g->type == VK_IMAGE_TYPE_3D;
     const uint32_t total_layers = is3d ? g->base.depth : g->layers;   // 3D images: the slices are the layers of 2D views
     // NVN levels to image levels: an image stored without its top level ([gfx] texture_detail) answers a view that starts there from
@@ -2269,13 +2566,18 @@ VkImageView tex_sampled_view(Texture* t, const ViewRequest& req) {
     // Check the actual alias format, rather than only the image's original format. view_for
     // can restrict inherited usages, but a descriptor must still have sampled-image usage.
     // Cache per image/device; this is also called for every pool descriptor refresh.
-    auto [feature, inserted] = g->sampled_formats.try_emplace(fmt, false);
-    if (inserted) {
-        VkFormatProperties fp = {};
-        vkGetPhysicalDeviceFormatProperties(device().physical(), fmt, &fp);
-        feature->second = (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0;
+    static const bool lean = nxrt::config_get_bool("nvn", "lean_draws", true);   // the last format's answer without the map (a property of the format)
+    if (!lean || g->last_sampled_fmt != fmt) {
+        auto [feature, inserted] = g->sampled_formats.try_emplace(fmt, false);
+        if (inserted) {
+            VkFormatProperties fp = {};
+            vkGetPhysicalDeviceFormatProperties(device().physical(), fmt, &fp);
+            feature->second = (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0;
+        }
+        g->last_sampled_fmt = fmt;
+        g->last_sampled_ok = feature->second;
     }
-    if (!feature->second) return bad_view(*t, "view format does not support sampling");
+    if (!g->last_sampled_ok) return bad_view(*t, "view format does not support sampling");
     return view_for(*g, req.type, bl, nl, bly, nly, fmt, asp, req.swizzle);
 }
 
