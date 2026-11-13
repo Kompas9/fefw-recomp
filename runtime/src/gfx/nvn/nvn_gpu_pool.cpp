@@ -992,6 +992,24 @@ VkBuffer mirror_chunk(Mirror& m, uint64_t page) {
         if (!logged) { logged = true; NXLOG_I(kTag, "pool copies: the budget is used up (%llu MiB): further chunks stay in the pools", static_cast<unsigned long long>(g_mirror_bytes >> 20)); }
         return VK_NULL_HANDLE;
     }
+    // [nvn] pool_mirror_pressure_percent (default 85; 0 = off): no new chunk while this process uses more than that share of the OS's video
+    // memory budget. The game keeps the assets of every scene it has loaded (#49: about +110 MiB of pools a hub reload, all of it live and
+    // registered), so the copies of their pages grew with each reload; past the budget Windows pages video memory out and the frame rate
+    // collapses. The pages stay in the pool, where draws read them as they do over the cap.
+    static const int64_t press = std::clamp<int64_t>(config_get_int("nvn", "pool_mirror_pressure_percent", 85), 0, 100);
+    if (press > 0) {
+        const int pct = gfx::video_usage_percent();
+        static bool refusing = false;
+        if (pct >= press) {
+            if (!refusing) {
+                refusing = true;
+                NXLOG_I(kTag, "pool copies: video memory at %d%% of the budget (over %lld%%): new chunks stay in the pools ([nvn] pool_mirror_pressure_percent; %llu MiB of copies)",
+                        pct, static_cast<long long>(press), static_cast<unsigned long long>(g_mirror_bytes >> 20));
+            }
+            return VK_NULL_HANDLE;
+        }
+        refusing = false;
+    }
     // texel buffer and transfer source usage: compute dispatches bind the copy directly as storage and texel buffers, and their results go
     // back to the pool from it (nvn_replay.cpp, compute shadows)
     const VkBufferUsageFlags usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |
@@ -1812,6 +1830,36 @@ void out_log() {
     }
     if (!why.empty()) NXLOG_I(kTag, "compute out: copy-backs by reason (KiB/flushes over %.1f s): %s", secs, why.c_str());
     p_end = end; p_gpu = gpu; p_fault = fault; p_inval = inval; pn_fault = nf; pn_inval = ni; pn_def = nd; pn_read = nr; pn_ng = ng; pn_gf = ngf; p_gfaults = gfaults;
+}
+
+// Per-load census ([diag] load_census): the Vulkan side of the game's pools. Host imports pin the game's own pages (system memory, not the
+// video memory budget); copy buffers and mirror chunks are video memory. Render thread.
+void log_import_census(const char* why) {
+    uint64_t pools = 0, imported = 0, shared = 0, copies = 0, failed = 0, mirrors = 0;
+    {
+        std::lock_guard<std::mutex> lk(g_live_mu);
+        pools = g_live.size();
+        auto chunk = [&](const PoolChunk& c) {
+            if (c.backing) shared += c.size;
+            else if (c.mem) imported += c.size;
+            if (c.copy.buffer) copies += c.copy.size;
+            if (c.failed && !c.copy.buffer) failed += c.size;
+        };
+        for (const PoolGpu* g : g_live) {
+            for (const PoolChunk& c : g->chunks) chunk(c);
+            for (const PoolChunk& c : g->spans) chunk(c);
+            if (g->mirror) ++mirrors;
+        }
+    }
+    size_t slabs = 0;
+    {
+        std::lock_guard<std::mutex> lk(g_slabs_mu);
+        for (const auto& kv : g_slabs) slabs += kv.second.expired() ? 0 : 1;
+    }
+    NXLOG_I("nvn.census", "%s: pool imports: %llu pools; host imports %.0f MiB, in shared 16 MiB slabs %.0f MiB (%zu slabs); copy buffers %.0f MiB; "
+            "not imported %.0f MiB; mirrors %llu, %.0f MiB of video memory",
+            why, static_cast<unsigned long long>(pools), imported / 1048576.0, shared / 1048576.0, slabs, copies / 1048576.0, failed / 1048576.0,
+            static_cast<unsigned long long>(mirrors), g_mirror_bytes / 1048576.0);
 }
 
 }  // namespace gpu

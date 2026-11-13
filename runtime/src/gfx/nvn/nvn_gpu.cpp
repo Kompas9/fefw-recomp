@@ -31,6 +31,7 @@
 #include "nxrt/log.h"
 #include "nxrt/lowlat.h"
 #include "vk_gauges.h"
+#include "nvn_astc_gpu.h"
 #include "nvn_gpu_internal.h"
 #include "nvn_impl.h"
 #include "nvn_pipeline.h"
@@ -1187,6 +1188,7 @@ bool bring_up(gfx::Device& dev, gfx::Renderer* rend, FrameLimiter* limiter, bool
     }
     NXLOG_I(kTag, "NVN back end up on %s (%u submission slots, timeline semaphore, host-memory import %s)", dev.properties().deviceName, kSlots,
             dev.features().external_memory_host ? "available" : "NOT available");
+    astc_gpu_start();   // [gfx] astc_gpu: its pipelines and self-test start now, on a thread of their own, so the first texture does not wait for them
     return true;
 }
 
