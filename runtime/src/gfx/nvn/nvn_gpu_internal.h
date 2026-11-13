@@ -136,7 +136,8 @@ void pool_shutdown();             // destroys every imported pool still alive an
 // and mirror_begin_submit before anything else of a submission (it records the copies of the pages draws wanted; on = this submission may
 // read copies).
 bool mirror_enabled();
-enum ReadUse { kReadVertex = 0, kReadIndex = 1, kReadUniform = 2 };
+enum ReadUse { kReadVertex = 0, kReadIndex = 1, kReadUniform = 2, kReadStorage = 3 };
+void storage_probe(uint64_t gpu_address, uint64_t size, bool vertex);   // [nvn] storage_read_copy diagnostics
 enum WriteUse { kWriteStorage = 0, kWriteXfb = 1, kWriteImageCopy = 2, kWriteUpdate = 3, kWriteFill = 4, kWriteCopy = 5 };
 BufRef resolve_read(uint64_t gpu_address, uint64_t size, int use);
 // The device-local copy of [gpu_address, +size) for the compute shadows (nvn_replay.cpp): its chunk and offset (buf null: no copy for it, or the

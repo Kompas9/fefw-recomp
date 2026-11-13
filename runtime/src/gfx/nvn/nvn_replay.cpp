@@ -1974,7 +1974,28 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                             bi.buffer = sh.buffer;
                             bi.offset = sh.offset;
                         }
-                        if (br.ok) gpu_wrote(bind.addr, bi.range, kWriteStorage);      // a storage buffer may be written by the shader
+                        bool served = false;
+                        if (d.nvn_stage != kCompute && !g_shadowing && br.ok) {
+                            storage_probe(bind.addr, bi.range, d.nvn_stage == kVertex);
+                            // [nvn] storage_read_copy = 1: a vertex shader's storage buffer is read from the device copy when it is valid; 2: any graphics stage.
+                            // Assumes the shader does not write the buffer (the pages stay valid: no gpu_wrote).
+                            static const int sto_mode = static_cast<int>(nxrt::config_get_int("nvn", "storage_read_copy", 2));
+                            if (sto_mode && (d.nvn_stage == kVertex || sto_mode >= 2)) {
+                                const BufRef rr = resolve_read(bind.addr, bi.range, kReadStorage);
+                                if (rr.ok && rr.buffer != br.buffer) {
+                                    bi.buffer = rr.buffer;
+                                    bi.offset = rr.offset;
+                                    bi.range = std::min<VkDeviceSize>(bi.range, rr.avail);
+                                    served = true;
+                                }
+                            }
+                        }
+                        // [nvn] gfx_ssbo_readonly (NXRT_NVN_GFX_SSBO_READONLY): a graphics shader that never stores to or applies an atomic to the buffer
+                        // (reflection: DescriptorBinding::written) leaves the pages valid: no GPU write is recorded, the device copies of the pool stay usable
+                        // and the next draw does not have to bind again. (In the translated Fortune's Weave shaders no vertex or fragment shader writes one.)
+                        static const bool ssbo_ro = nxrt::config_get_bool("nvn", "gfx_ssbo_readonly", true);
+                        const bool read_only_gfx = ssbo_ro && d.nvn_stage != kCompute && !b.written;
+                        if (br.ok && !served && !read_only_gfx) gpu_wrote(bind.addr, bi.range, kWriteStorage);      // a storage buffer may be written by the shader
                     }
                     break;
                 }
@@ -2741,7 +2762,9 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
     if (g_dirty & (kDesc | kPipe)) {
         ++g_rs.draws_desc;
         g_prog_writes = false;
-        for (const BindingDesc& d : pl->bindings) g_prog_writes |= d.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER || d.type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        static const bool ssbo_ro_pass = nxrt::config_get_bool("nvn", "gfx_ssbo_readonly", true);
+        for (const BindingDesc& d : pl->bindings)
+            g_prog_writes |= (d.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER && !(ssbo_ro_pass && !d.shader->refl.bindings[d.index].written)) || d.type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         attach_targets(false);
         g_want_depth_ro = samples_depth_target(*pl);
         prepare_textures(*pl);
