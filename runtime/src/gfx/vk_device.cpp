@@ -22,6 +22,7 @@
 #include "nxrt/log.h"
 #include "nxrt/platform.h"
 #include "vk_gauges.h"
+#include "vk_layer_filter.h"
 #include <unordered_map>
 #include "extras/framegen.h"
 #include "extras/framegen_ffx.h"
@@ -419,6 +420,7 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     const bool headless = desc.headless >= 0 ? desc.headless != 0 : config_get_bool("gfx", "headless", false);
     std::string gpu_want = !desc.gpu.empty() ? desc.gpu : config_get_str("gfx", "gpu", "");
 
+    disable_overwolf_vulkan_layers();   // Overwolf's installed Vulkan layers collide with the driver hooks Streamline and NGX install
     // DLSS / DLAA: Streamline must see the instance, device and swapchain calls, so the loader functions come from sl.interposer.dll
     const PFN_vkGetInstanceProcAddr sl_gipa = extras::streamline_preinit();
     if (sl_gipa) volkInitializeCustom(sl_gipa);
