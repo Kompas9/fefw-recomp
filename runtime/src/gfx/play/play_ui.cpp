@@ -201,7 +201,7 @@ void sanitize(Settings& s) {
     h.highlight_boost = std::clamp(h.highlight_boost, 0.0, 2.0);
     s.extras.upscale.sharpness = std::clamp(s.extras.upscale.sharpness, 0.0, 1.0);
     s.extras.picture = extras::picture_clamped(s.extras.picture);
-    s.audio.volume = std::clamp(s.audio.volume, 0.0, 1.0);
+    s.audio.volume = std::clamp(s.audio.volume, 0.0, 2.0);
     s.display.monitor = std::clamp(s.display.monitor, 0, 32);
     if (s.audio.device.empty()) s.audio.device = "default";
 }
@@ -1071,11 +1071,11 @@ void audio_page(Page& p) {
     AudioSettings& a = p.edit.audio;
     ImGui::SeparatorText("Volume");
     float pct = static_cast<float>(a.volume * 100.0);
-    if (ImGui::SliderFloat("Master volume", &pct, 0.0f, 100.0f, "%.0f%%")) {
-        a.volume = std::clamp(static_cast<double>(pct), 0.0, 100.0) / 100.0;
+    if (ImGui::SliderFloat("Master volume", &pct, 0.0f, 200.0f, "%.0f%%")) {
+        a.volume = std::clamp(static_cast<double>(pct), 0.0, 200.0) / 100.0;
         mark(p);
     }
-    tip("The volume of everything the game plays, applied as a gain in the audio output. [audio] volume in the ini or NXRT_AUDIO_VOLUME wins at the start.");
+    tip("The volume of everything the game plays, applied as a gain in the audio output. Above 100% it is a boost (up to 200%) with a limiter, so loud parts are held back instead of clipping. [audio] volume in the ini or NXRT_AUDIO_VOLUME wins at the start.");
     if (ImGui::Checkbox("Mute when the window is not in focus", &a.mute_unfocused)) mark(p);
 
     ImGui::SeparatorText("Output");

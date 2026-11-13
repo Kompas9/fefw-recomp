@@ -204,7 +204,7 @@ struct DisplaySettings {
 
 // ---- audio -------------------------------------------------------------------------------------------------------------------------
 struct AudioSettings {
-    double volume = 1.0;           // [audio] volume, master gain 0..1, applied live; [audio] volume in the ini or the environment wins at the start
+    double volume = 1.0;           // [audio] volume, master gain 0..2 (above 1: limited boost), applied live; [audio] volume in the ini or the environment wins at the start
     bool mute_unfocused = false;   // [audio] mute_unfocused: silent while the window has no focus (live)
     std::string device = "default";   // [audio] device: "default" or part of an output device's name; used at the next start ([audio] device in the ini wins)
 };

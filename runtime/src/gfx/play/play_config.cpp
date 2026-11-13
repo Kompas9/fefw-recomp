@@ -493,7 +493,7 @@ bool apply_fixed(Sec sec, const std::string& k, const std::string& v, Settings* 
             }
             break;
         case Sec::Audio:
-            if (k == "volume") return set_real(0.0, 1.0, &s->audio.volume);
+            if (k == "volume") return set_real(0.0, 2.0, &s->audio.volume);   // above 1.0: boost (limited)
             if (k == "mute_unfocused") return set_bool(&s->audio.mute_unfocused);
             if (k == "device") {
                 s->audio.device = v.empty() ? "default" : v;
