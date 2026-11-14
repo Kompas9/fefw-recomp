@@ -872,6 +872,7 @@ namespace nxrt::nvn::be::gpu {
 bool spirv_int_samplers(const std::vector<uint32_t>& in, const std::vector<SpvIntSampler>& slots, std::vector<uint32_t>& out) {
     enum : uint32_t { OpTypeIntOp = 21, OpTypeFloatOp = 22, OpTypeVectorOp = 23, OpTypeImageOp = 25, OpTypeSampledImageOp = 27,
                       OpTypePointerOp = 32, OpFunctionOp = 54, OpVariableOp = 59, OpLoadOp = 61, OpDecorateOp = 71,
+                      OpExtInstOp = 12, OpVectorShuffleOp = 79, OpCompositeExtractOp = 81, OpCompositeInsertOp = 82,
                       OpImageSampleImplicitLodOp = 87, OpImageSampleExplicitLodOp = 88, OpImageSampleProjImplicitLodOp = 91,
                       OpImageSampleProjExplicitLodOp = 92, OpImageFetchOp = 95, OpImageGatherOp = 96, OpImageOp = 100,
                       OpImageQuerySizeLodOp = 103, OpImageQuerySizeOp = 104, OpImageQueryLodOp = 105, OpImageQueryLevelsOp = 106,
@@ -981,8 +982,15 @@ bool spirv_int_samplers(const std::vector<uint32_t>& in, const std::vector<SpvIn
     for (const auto& [var, wk] : work) vars[var] = &wk;
     struct Edit { uint32_t new_type = 0, new_result = 0, cast_type = 0; };
     std::map<size_t, Edit> edits;                                  // by instruction position
+    // Words of these instructions that are literals, not ids: the extended instruction number (OpExtInst), the indices of OpCompositeExtract /
+    // OpCompositeInsert and the components of OpVectorShuffle. A literal that equals the id of a sampler variable (SMax is 42 and the
+    // variable was %42) is not a use of it.
+    auto is_literal = [](uint32_t op, uint32_t k) {
+        return (op == OpExtInstOp && k == 4) || (op == OpCompositeExtractOp && k >= 4) || ((op == OpCompositeInsertOp || op == OpVectorShuffleOp) && k >= 5);
+    };
     auto mentions = [&](const uint32_t* w, uint32_t len, const std::map<uint32_t, const Work*>& ids, uint32_t from) {
-        for (uint32_t k = from; k < len; ++k) if (ids.count(w[k])) return true;
+        const uint32_t op = w[0] & 0xffff;
+        for (uint32_t k = from; k < len; ++k) if (!is_literal(op, k) && ids.count(w[k])) return true;
         return false;
     };
     for (const Inst& n : insts) {
