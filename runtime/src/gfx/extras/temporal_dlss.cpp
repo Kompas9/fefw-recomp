@@ -7,6 +7,7 @@
 // the Vulkan loader functions come from its vkGetInstanceProcAddr (streamline_preinit, called by vk_device.cpp before volk is initialised).
 // Choosing DLSS later in the F1 page takes effect at the next start.
 #include <windows.h>
+#include <tlhelp32.h>
 
 #include <atomic>
 #include <cctype>
@@ -104,9 +105,34 @@ Sl& sl_state() {
     return s;
 }
 
+// The Streamline plugins (sl.*.dll, nvngx_*.dll) that are loaded in this process: logged once after slInit and once at the first DLSS mode,
+// so a log shows which of the DLLs beside sl.interposer.dll Streamline really loads.
+void log_streamline_modules(const char* when) {
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, GetCurrentProcessId());
+    if (snap == INVALID_HANDLE_VALUE) return;
+    std::string list;
+    MODULEENTRY32W me = {};
+    me.dwSize = sizeof me;
+    for (BOOL ok = Module32FirstW(snap, &me); ok; ok = Module32NextW(snap, &me)) {
+        const std::string name = narrow(me.szModule), path = narrow(me.szExePath);
+        std::string lower = name, lower_path = path;
+        for (char& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        for (char& c : lower_path) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        // Streamline's own files, NGX's, and what Streamline loads from NVIDIA's override folders (their files have other names)
+        if (lower.rfind("sl.", 0) == 0 || lower.rfind("nvngx", 0) == 0 || lower.rfind("nvlowlatency", 0) == 0 || lower_path.find("\\ngx\\") != std::string::npos ||
+            lower_path.find("streamline") != std::string::npos)
+            list += (list.empty() ? "" : " | ") + path;
+    }
+    CloseHandle(snap);
+    NXLOG_I(kTag, "Streamline modules loaded %s: %s", when, list.empty() ? "(none)" : list.c_str());
+}
+
 void on_log(sl::LogType type, const char* msg) {
     std::string m = msg ? msg : "";
     while (!m.empty() && (m.back() == '\n' || m.back() == '\r')) m.pop_back();
+    // The plugin scan lists every sl.*.dll of the DLSS folder and ignores the ones the host did not ask for; players put the whole Streamline set
+    // there, so this warning is a line per unused plugin on every start. Only with [dlss] verbose.
+    if (type == sl::LogType::eWarn && m.find("was not requested by the host") != std::string::npos && !config_get_bool("dlss", "verbose", false)) return;
     if (type == sl::LogType::eError) NXLOG_E(kTag, "streamline: %s", m.c_str());
     else if (type == sl::LogType::eWarn) NXLOG_W(kTag, "streamline: %s", m.c_str());
     else if (config_get_bool("dlss", "verbose", false)) NXLOG_I(kTag, "streamline: %s", m.c_str());
@@ -171,6 +197,13 @@ public:
                 }
             }
             if ((m != last_mode_ || !same_out) && s.set_options(vp, options(m, f.out)) != sl::Result::eOk) return fail("slDLSSSetOptions");
+            {
+                static bool modules_logged = false;
+                if (!modules_logged) {
+                    modules_logged = true;
+                    log_streamline_modules("at the first DLSS mode");
+                }
+            }
             if (m != last_mode_ || !same_out)
                 NXLOG_I(kTag, "%s: mode %s, %ux%u -> %ux%u (input range %ux%u .. %ux%u)", name(), mode_name(m), f.render.width, f.render.height, f.out.width,
                         f.out.height, rg.min_w, rg.min_h, rg.max_w, rg.max_h);
@@ -384,6 +417,7 @@ PFN_vkGetInstanceProcAddr streamline_preinit() {
     s.framegen = fg;
     NXLOG_I(kTag, "Streamline %d.%d.%d started from %s: the Vulkan instance and device are created through it", SL_VERSION_MAJOR, SL_VERSION_MINOR,
             SL_VERSION_PATCH, narrow(dir).c_str());
+    log_streamline_modules("after slInit");
     return gipa;
 }
 
