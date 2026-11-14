@@ -8,7 +8,7 @@ import * as play from './pages/play.js';
 import * as settings from './pages/settings.js';
 import * as setup from './pages/setup.js';
 import * as about from './pages/about.js';
-import { upd, notify, checkNow, available } from './update.js';
+import { upd, notify, checkNow, available, UPDATES_ENABLED } from './update.js';
 
 const PAGES = {
   play: { mod: play, key: 'nav.play', icon: 'play' },
@@ -98,7 +98,7 @@ async function boot() {
   drawShell();
   // first run: no game files chosen yet
   go(cfg.dump_dir ? 'play' : 'setup', { firstRun: !cfg.dump_dir });
-  if (!cfg.skip_update_check) checkNow(); // quietly: a failure only shows on the About page
+  if (UPDATES_ENABLED && !cfg.skip_update_check) checkNow(); // quietly: a failure only shows on the About page
 }
 
 boot();

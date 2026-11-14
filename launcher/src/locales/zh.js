@@ -341,6 +341,7 @@ export const zh = {
   'settings.files.checking': '正在检查文件……',
   'settings.files.dlss': 'DLSS',
   'settings.files.dlssFrameGen': 'DLSS 帧生成',
+  'settings.files.dlssUnused': '本游戏不会用到文件夹中的这些文件：{files}。可以将它们从文件夹中删除（前提是没有其他程序使用该文件夹）；其中一些仍会被 NVIDIA 的 NGX 加载。',
   'settings.files.xess': 'XeSS',
   'settings.files.found': '已找到（{detail}）',
   'settings.files.frameGen': '帧生成',

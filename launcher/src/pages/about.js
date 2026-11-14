@@ -1,6 +1,6 @@
 import { getVersion } from '@tauri-apps/api/app';
 import { api, esc, icon, refreshIcons, toast, errText } from '../util.js';
-import { upd, checkNow, available } from '../update.js';
+import { upd, checkNow, available, UPDATES_ENABLED } from '../update.js';
 import { t } from '../i18n.js';
 import { updText } from '../rusttext.js';
 
@@ -104,7 +104,7 @@ export async function render(el) {
         <h1>${esc(t('about.title'))}</h1>
         <p class="dim">${esc(t('about.intro'))}</p>
       </div>
-      ${updateCard(cfg)}
+      ${UPDATES_ENABLED ? updateCard(cfg) : ''}
       <div class="card">
         <h2>${icon('info')}${esc(t('brand.name'))} ${esc(t('about.launcherWord'))}</h2>
 
