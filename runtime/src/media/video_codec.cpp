@@ -933,9 +933,10 @@ VideoCodecStats video_codec_stats() {
 
 bool install_video_codec_hle() {
     static bool logged = false;
-    if (!logged && game::info().platform == game::Platform::Switch2) {
+    // A title with movie_video_decoder (Fortune's Weave) plays AV1 movies through dav1d (movie_vdec.cpp) and never needs the VP8/VP9 decoders.
+    if (!logged && game::info().platform == game::Platform::Switch2 && !game::info().movie_video_decoder) {
         logged = true;
-        NXLOG_W("vcodec", "built without libvpx (NXRT_HAVE_LIBVPX): movies are left out");
+        NXLOG_W("vcodec", "built without libvpx (NXRT_HAVE_LIBVPX): VP8/VP9 movies are left out");
     }
     return false;
 }
