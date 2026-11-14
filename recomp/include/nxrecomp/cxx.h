@@ -127,15 +127,15 @@ NX_INLINE void barrier() { __atomic_thread_fence(__ATOMIC_SEQ_CST); }
 
 
 
-NX_INLINE uint64_t subs64(Ctx *c, uint64_t a, uint64_t b) { return adds64(c, a, ~b, 1); }
-NX_INLINE uint32_t subs32(Ctx *c, uint32_t a, uint32_t b) { return adds32(c, a, ~b, 1); }
+template <class H> NX_INLINE uint64_t subs64(H *c, uint64_t a, uint64_t b) { return adds64(c, a, ~b, 1); }
+template <class H> NX_INLINE uint32_t subs32(H *c, uint32_t a, uint32_t b) { return adds32(c, a, ~b, 1); }
 
 
 
 
 
-template <typename F>
-NX_INLINE void fcmp(Ctx *c, F a, F b) {
+template <typename F, class H>
+NX_INLINE void fcmp(H *c, F a, F b) {
     if (std::isnan(a) || std::isnan(b))
         set_nzcv(c, 0b0011);
     else if (a == b)
