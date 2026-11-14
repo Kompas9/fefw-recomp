@@ -17,6 +17,7 @@ import bisect
 import collections
 import multiprocessing
 import os
+import re
 import struct
 import sys
 import time
@@ -336,6 +337,15 @@ def lift_function(env, entry):
         out.append('  if (rp) switch (rp) {')
         out.extend('  case 0x%xULL: goto L_%x;' % (lp, lp) for lp in pads)
         out.append('  default: guest_trap("resume at an address that is not a landing pad of this function", rp); return; }')
+    # The condition flags NZCV are a local of the function (NxFlags fl), not four words of the Ctx: the AArch64 ABI does not keep them
+    # across a call or a return, so no store to the Ctx is needed and the compiler drops every flag no later instruction reads (a compare
+    # followed by its branch becomes the host compare). A function that uses no flag helper gets no local. fl starts as the Ctx's flags.
+    flag_lines = []
+    for pc, stmt in lines:
+        flag_lines.append((pc, FLAG_CALL.sub(lambda m: m.group(1) + (m.group(2) or '') + '(&fl', stmt)))
+    if any(a[1] != b[1] for a, b in zip(lines, flag_lines)):
+        lines = flag_lines
+        out.insert(2, '  NxFlags fl = {c->N, c->Z, c->C, c->V};')
     needed = set(fn.targets) | set(pads)
     if fn.has_br_fallback:
         needed = {pc for pc, _ in lines}
@@ -361,6 +371,9 @@ def lift_function(env, entry):
     if two:
         out.append('void f_%x(Ctx *__restrict c) { %s }' % (entry, 'nx_catch_call(c, u_%x);' % entry if entry in env.catchers else 'u_%x(c, 0);' % entry))
     return '\n'.join(out), len(lines), bad, [(lp, entry) for lp in pads]
+
+
+FLAG_CALL = re.compile(r'\b(adds64|adds32|logic64|logic32|set_nzcv|get_nzcv|cond|subs64|subs32|fcmp)(<[^>(]*>)?\(c\b')
 
 
 # ---------------------------------------------------------------------------------------------------- whole module

@@ -195,6 +195,49 @@ static inline void vzero(V128 *v) { v->d[0] = 0; v->d[1] = 0; }
 /* flags and integer helpers                                                                                  */
 /* ======================================================================================================== */
 
+/* The condition flags live in four words of the Ctx, or, in generated code that keeps them in a local of the function
+ * (nxrecomp/program.py), in an NxFlags: the helpers take either (C++: any type with N, Z, C and V). */
+typedef struct NxFlags { uint32_t N, Z, C, V; } NxFlags;
+#ifdef __cplusplus
+}  /* extern "C": templates cannot have C linkage */
+template <class H> static inline uint64_t adds64(H *c, uint64_t a, uint64_t b, uint32_t cin) {
+    uint64_t r = a + b + cin;
+    c->N = (uint32_t)(r >> 63);
+    c->Z = r == 0;
+    c->C = (r < a) || (cin && r == a);
+    c->V = (uint32_t)(((a ^ r) & (b ^ r)) >> 63);
+    return r;
+}
+template <class H> static inline uint32_t adds32(H *c, uint32_t a, uint32_t b, uint32_t cin) {
+    uint64_t wide = (uint64_t)a + b + cin;
+    uint32_t r = (uint32_t)wide;
+    c->N = r >> 31;
+    c->Z = r == 0;
+    c->C = (uint32_t)(wide >> 32);
+    c->V = ((a ^ r) & (b ^ r)) >> 31;
+    return r;
+}
+template <class H> static inline uint64_t logic64(H *c, uint64_t r) { c->N = (uint32_t)(r >> 63); c->Z = r == 0; c->C = 0; c->V = 0; return r; }
+template <class H> static inline uint32_t logic32(H *c, uint32_t r) { c->N = r >> 31; c->Z = r == 0; c->C = 0; c->V = 0; return r; }
+template <class H> static inline void set_nzcv(H *c, int f) { c->N = (f >> 3) & 1; c->Z = (f >> 2) & 1; c->C = (f >> 1) & 1; c->V = f & 1; }
+template <class H> static inline uint64_t get_nzcv(const H *c) { return ((uint64_t)c->N << 31) | ((uint64_t)c->Z << 30) | ((uint64_t)c->C << 29) | ((uint64_t)c->V << 28); }
+
+template <class H> static inline int cond(const H *c, int cc) {
+    int r;
+    switch (cc >> 1) {
+    case 0: r = c->Z; break;
+    case 1: r = c->C; break;
+    case 2: r = c->N; break;
+    case 3: r = c->V; break;
+    case 4: r = c->C && !c->Z; break;
+    case 5: r = c->N == c->V; break;
+    case 6: r = c->N == c->V && !c->Z; break;
+    default: return 1;
+    }
+    return (cc & 1) ? !r : r;
+}
+extern "C" {
+#else
 static inline uint64_t adds64(Ctx *c, uint64_t a, uint64_t b, uint32_t cin) {
     uint64_t r = a + b + cin;
     c->N = (uint32_t)(r >> 63);
@@ -231,13 +274,25 @@ static inline int cond(const Ctx *c, int cc) {
     }
     return (cc & 1) ? !r : r;
 }
+#endif
 
+#ifdef __cplusplus
+}  /* extern "C" */
+template <class H> static inline void fcmp(H *c, double a, double b) {
+    if (a != a || b != b) set_nzcv(c, 3);
+    else if (a == b) set_nzcv(c, 6);
+    else if (a < b) set_nzcv(c, 8);
+    else set_nzcv(c, 2);
+}
+extern "C" {
+#else
 static inline void fcmp(Ctx *c, double a, double b) {
     if (a != a || b != b) set_nzcv(c, 3);
     else if (a == b) set_nzcv(c, 6);
     else if (a < b) set_nzcv(c, 8);
     else set_nzcv(c, 2);
 }
+#endif
 
 static inline uint32_t ror32(uint32_t v, unsigned n) { n &= 31; return n ? (v >> n) | (v << (32 - n)) : v; }
 static inline uint64_t ror64(uint64_t v, unsigned n) { n &= 63; return n ? (v >> n) | (v << (64 - n)) : v; }
