@@ -809,9 +809,23 @@ TexGpu* create_texture_gpu(Texture* t, float want_scale) {
             flags |= VK_IMAGE_CREATE_EXTENDED_USAGE_BIT;
             usage |= VK_IMAGE_USAGE_STORAGE_BIT;
         }
-        if ((t->b.flags & NVN_TEXTURE_FLAGS_IMAGE) && !(usage & VK_IMAGE_USAGE_STORAGE_BIT))
-            NXLOG_W(kTag, "texture %u (%s, image flag set): the GPU refuses storage usage with the other usages (flags 0x%x, usage 0x%x)", t->id, t->fmt ? t->fmt->name : "?",
-                    static_cast<unsigned>(flags), static_cast<unsigned>(usage));
+        // The game sets the IMAGE flag on textures it never stores to (RGB565 ones in Fortune's Weave), and the GPU may not offer storage for the
+        // format (desktop GPUs do not for RGB565). That alone is not a problem: a draw that does bind such a texture as a storage image logs
+        // "storage image: texture N ... has no storage view" (replay) and gets a dummy image. So the image is only noted, once per format.
+        if ((t->b.flags & NVN_TEXTURE_FLAGS_IMAGE) && !(usage & VK_IMAGE_USAGE_STORAGE_BIT)) {
+            static std::mutex noted_mu;
+            static std::set<std::string> noted;
+            const std::string name = t->fmt ? t->fmt->name : "?";
+            bool first = false;
+            {
+                std::lock_guard<std::mutex> lk(noted_mu);
+                first = noted.insert(name).second;
+            }
+            if (first)
+                NXLOG_I(kTag, "texture %u (%s, image flag set): the GPU offers no storage usage for it (flags 0x%x, usage 0x%x); a shader that stores to such a texture is logged "
+                              "as 'storage image: ... has no storage view' (this note is logged once per format)", t->id, name.c_str(), static_cast<unsigned>(flags),
+                        static_cast<unsigned>(usage));
+        }
     }
     g->usage = usage;
 
