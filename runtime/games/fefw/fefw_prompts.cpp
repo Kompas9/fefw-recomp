@@ -517,6 +517,29 @@ bool make_icon(const Font& f, int k, const std::string& name, Img* out) {
     auto in_shape = [&](const std::string& text, float wfrac, float hfrac) { add_text(cut, text, cx, cy, ob.w() * wfrac, ob.h() * hfrac); };
     const std::string kind = name.substr(0, name.find('/'));
     const std::string what = name.substr(name.find('/') + 1);
+    if (kind == "dpad") {   // a D-pad (a plus of two rounded bars, outlined) with its left or right arm filled
+        const bool left = what == "left";
+        Img o;
+        o.w = orig.w;
+        o.h = orig.h;
+        o.a.assign(static_cast<size_t>(o.w) * o.h, 0);
+        const float R = 0.96f * r, aw = 0.36f * R, rr = 0.14f * R, t = std::max(1.3f, 0.14f * R);
+        auto sd_round_box = [rr](float x, float y, float hx, float hy) {
+            const float qx = std::fabs(x) - (hx - rr), qy = std::fabs(y) - (hy - rr);
+            return std::hypot(std::max(qx, 0.f), std::max(qy, 0.f)) + std::min(std::max(qx, qy), 0.f) - rr;
+        };
+        for (int y = 0; y < o.h; ++y)
+            for (int x = 0; x < o.w; ++x) {
+                const float px = x + 0.5f - cx, py = y + 0.5f - cy;
+                const float sd = std::min(sd_round_box(px, py, R, aw), sd_round_box(px, py, aw, R));   // the union of the two bars
+                const float fill = std::clamp(0.5f - sd, 0.f, 1.f);
+                const float edge = std::clamp(0.5f - (std::fabs(sd + 0.5f * t) - 0.5f * t), 0.f, 1.f);   // an outline of thickness t inside the shape
+                const bool arm = left ? px < -aw : px > aw;                                              // the arm beyond the centre square
+                o.a[static_cast<size_t>(y) * o.w + x] = static_cast<uint8_t>(255.f * std::max(edge, arm ? fill : 0.f) + 0.5f);
+            }
+        *out = o;
+        return true;
+    }
     if (kind == "dots") {   // a dot cluster from the game's four single-dot glyphs: each quarter from one whose dot there is filled or not
         const int mask = std::atoi(what.c_str());
         const Img* single[4] = {&f.tcell[kSingleDots + 2].img, &f.tcell[kSingleDots].img, &f.tcell[kSingleDots + 1].img,
@@ -638,6 +661,7 @@ struct State {
     bool enabled = true;
     bool tried = false;
     play::GameHost* host = nullptr;
+    std::string pager_dpad;   // [fefw] pager_dpad: the font sizes (small, normal, large; all; off) whose left / right position glyphs show a D-pad
     std::array<Font, 3> fonts{Font{"__nintendo_ext_003.bffnt.zst"}, Font{"__nintendo_ext_003_Small.bffnt.zst"},
                               Font{"__nintendo_ext_003_Large.bffnt.zst"}};
     uint64_t frames = 0;
@@ -771,6 +795,9 @@ void prompts_install(play::GameHost* host) {
     s.host = host;
     s.enabled = config_get_bool("fefw", "prompt_glyphs", true);
     s.dump_dir = config_get_str("fefw", "prompt_dump", "");
+    s.pager_dpad = config_get_str("fefw", "pager_dpad", "small");
+    for (char& c : s.pager_dpad) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (s.pager_dpad != "off") NXLOG_I(kTag, "the left / right position glyphs of these font sizes show a D-pad with a pad: %s ([fefw] pager_dpad)", s.pager_dpad.c_str());
     if (!s.enabled) NXLOG_I(kTag, "off ([fefw] prompt_glyphs = 0): the game's Switch glyphs stay");
 }
 
@@ -803,20 +830,33 @@ void prompts_frame() {
         s.last_style = style;
     }
     for (int k = 0; k < kTargetCount; ++k) s.want[k] = icon_for(set, style, kTargets[k]);
+    const bool pad_style = style == play::PromptStyle::Xbox || style == play::PromptStyle::PlayStation;
+    // The tutorial pager draws the game's single left and right position glyphs (Y and A on a Switch); with a pad, the glyphs of the font sizes it
+    // uses show a D-pad left / right instead of the face buttons that do the same (the D-pad turns the page as well). The same glyphs in other
+    // texts mean the real Y / A buttons, so this is per font size ([fefw] pager_dpad).
+    auto want_for = [&](const Font& f, int k) -> std::string {
+        if (pad_style && s.pager_dpad != "off" && !s.pager_dpad.empty() && (k == kSingleDots || k == kSingleDots + 3)) {
+            const std::string file = f.file;
+            const char* size = file.find("_Small") != std::string::npos ? "small" : file.find("_Large") != std::string::npos ? "large" : "normal";
+            if (s.pager_dpad.find("all") != std::string::npos || s.pager_dpad.find(size) != std::string::npos) return k == kSingleDots ? "dpad/right" : "dpad/left";
+        }
+        return s.want[k];
+    };
     for (Font& f : s.fonts) {
         for (size_t i = 0; i < f.live.size();) {
             Font::Live& l = f.live[i];
             bool gone = false;
             for (int k = 0; k < kTargetCount && !gone; ++k) {
-                if (l.shown[k] == s.want[k]) continue;
-                if (!show(f, l.id, k, s.want[k])) { gone = true; break; }
+                const std::string want = want_for(f, k);
+                if (l.shown[k] == want) continue;
+                if (!show(f, l.id, k, want)) { gone = true; break; }
                 if (s.writes++ < 60)
-                    NXLOG_I(kTag, "%s #%u: U+%04X -> %s", f.file, l.id, kTargets[k].code, s.want[k].empty() ? "game" : s.want[k].c_str());
-                if (!s.dump_dir.empty() && !s.want[k].empty()) {
+                    NXLOG_I(kTag, "%s #%u: U+%04X -> %s", f.file, l.id, kTargets[k].code, want.empty() ? "game" : want.c_str());
+                if (!s.dump_dir.empty() && !want.empty()) {
                     Img icon;
-                    if (make_icon(f, k, s.want[k], &icon)) dump_pgm(s.dump_dir, std::string(f.file).substr(2, 22) + "_" + s.want[k], icon);
+                    if (make_icon(f, k, want, &icon)) dump_pgm(s.dump_dir, std::string(f.file).substr(2, 22) + "_" + want, icon);
                 }
-                l.shown[k] = s.want[k];
+                l.shown[k] = want;
             }
             if (gone) {   // the game let go of the texture (a font unloaded): forget it, a new one is found by the scan
                 NXLOG_I(kTag, "%s: texture #%u is gone", f.file, l.id);
