@@ -215,6 +215,7 @@ export const en = {
     'settings.files.frameGen': "Frame generation",
     'settings.files.dlss': "DLSS",
     'settings.files.dlssFrameGen': "DLSS frame generation",
+    'settings.files.dlssUnused': "This game does not use these files in the folder: {files}. You can delete them from the folder (if no other program uses it); NVIDIA's NGX loads some of them anyway.",
     'settings.files.xess': "XeSS",
     'settings.textureDetail.label': "Texture detail",
     'settings.textureDetail.hint': "Half stores the game's large textures at half size, which is what the console's memory holds. Pick it if the game slows down or stops in the capital and other big areas; pick Full on an 8 GB GPU for sharper textures at the cost of video memory. Applies at the next start.",
