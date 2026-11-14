@@ -661,7 +661,7 @@ struct State {
     bool enabled = true;
     bool tried = false;
     play::GameHost* host = nullptr;
-    std::string pager_dpad;   // [fefw] pager_dpad: the font sizes (small, normal, large; all) whose left / right position glyphs show a D-pad
+    std::string pager_dpad;   // [fefw] pager_dpad: the font sizes (small, normal, large; all; off) whose left / right position glyphs show a D-pad
     std::array<Font, 3> fonts{Font{"__nintendo_ext_003.bffnt.zst"}, Font{"__nintendo_ext_003_Small.bffnt.zst"},
                               Font{"__nintendo_ext_003_Large.bffnt.zst"}};
     uint64_t frames = 0;
@@ -795,9 +795,9 @@ void prompts_install(play::GameHost* host) {
     s.host = host;
     s.enabled = config_get_bool("fefw", "prompt_glyphs", true);
     s.dump_dir = config_get_str("fefw", "prompt_dump", "");
-    s.pager_dpad = config_get_str("fefw", "pager_dpad", "");
+    s.pager_dpad = config_get_str("fefw", "pager_dpad", "small");
     for (char& c : s.pager_dpad) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    if (!s.pager_dpad.empty()) NXLOG_I(kTag, "the left / right position glyphs of these font sizes show a D-pad: %s ([fefw] pager_dpad)", s.pager_dpad.c_str());
+    if (s.pager_dpad != "off") NXLOG_I(kTag, "the left / right position glyphs of these font sizes show a D-pad with a pad: %s ([fefw] pager_dpad)", s.pager_dpad.c_str());
     if (!s.enabled) NXLOG_I(kTag, "off ([fefw] prompt_glyphs = 0): the game's Switch glyphs stay");
 }
 
@@ -835,7 +835,7 @@ void prompts_frame() {
     // uses show a D-pad left / right instead of the face buttons that do the same (the D-pad turns the page as well). The same glyphs in other
     // texts mean the real Y / A buttons, so this is per font size ([fefw] pager_dpad).
     auto want_for = [&](const Font& f, int k) -> std::string {
-        if (pad_style && !s.pager_dpad.empty() && (k == kSingleDots || k == kSingleDots + 3)) {
+        if (pad_style && s.pager_dpad != "off" && !s.pager_dpad.empty() && (k == kSingleDots || k == kSingleDots + 3)) {
             const std::string file = f.file;
             const char* size = file.find("_Small") != std::string::npos ? "small" : file.find("_Large") != std::string::npos ? "large" : "normal";
             if (s.pager_dpad.find("all") != std::string::npos || s.pager_dpad.find(size) != std::string::npos) return k == kSingleDots ? "dpad/right" : "dpad/left";
