@@ -6,7 +6,7 @@ Fetched into this folder (git-ignored by `tools/textures/.gitignore`). Nothing h
 
 - URL: https://github.com/ARM-software/astc-encoder.git
 - Folder: `third_party/astc-encoder`
-- Tag: `5.7.0`, commit `baff485b0ff36d2f95d28961605106502c653966` (2026-07-31, "Prepare 5.7.0 release (#662)")
+- Tag: `5.7.1`, commit `0affb51aaf0e0de3a8b038fa32487d59754a1eed` (2026-11-03, "Add changelog entry for 5.7.1 release (#685)")
 - Licence: `third_party/astc-encoder/LICENSE.txt`, SPDX `Apache-2.0`. Core sources carry `SPDX-License-Identifier: Apache-2.0`.
 - Bundled third-party code under `Source/ThirdParty/`: `exr_reader.hh` and `streamreader.hh` are `BSD-3-Clause` (Syoyo Fujita, 2025). The rest (stb_image, tinyexr, wuffs) are in the same folder and were not checked file by file.
 
