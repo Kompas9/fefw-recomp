@@ -2456,19 +2456,8 @@ bool build_key(GraphicsKey& key, VkPrimitiveTopology topo) {
         key.logic_op = static_cast<uint8_t>(vk_logic_op(S.color.logic_op));
         for (uint32_t i = 0; i < 8; ++i) key.blend_enable[i] = 0;
     }
-    // The console's fixed-function alpha test: the fragment shader runs as a variant that kills the invocation when alpha (colour output 0) fails
-    // the test (resolve_stage_modules, spirv_alpha_test). [nvn] alpha_test = false: off (A/B).
-    if (S.color.alpha_test != 0 && S.color.alpha_test != NVN_ALPHA_FUNC_ALWAYS) {
-        static const bool alpha_on = nxrt::config_get_bool("nvn", "alpha_test", true);
-        if (!alpha_on) {
-            NVN_LOG_ONCE("alpha-test", "alpha test is enabled by the game: [nvn] alpha_test = false, not applied");
-        } else if (key.stage[1] && !key.no_out && !key.dual_src && !key.xfb && key.color_format[0] != 0 && S.color.alpha_test >= NVN_ALPHA_FUNC_NEVER && S.color.alpha_test <= NVN_ALPHA_FUNC_GEQUAL) {
-            key.alpha_func = static_cast<uint8_t>(S.color.alpha_test);
-            std::memcpy(&key.alpha_ref_bits, &S.alpha_ref, sizeof key.alpha_ref_bits);
-        } else {
-            NVN_LOG_ONCE("alpha-test", "alpha test is enabled by the game on a draw this runtime does not patch (no fragment shader, no colour output 0, dual-source or stream-out)");
-        }
-    }
+    // The game's alpha test (alpha_test_wanted, begin_draw chose the alpha-test layout): the fragment shader variant; the reference is a push constant.
+    if (g_alpha_draw && key.stage[1] && !key.no_out && !key.dual_src && !key.xfb && key.color_format[0] != 0) key.alpha_func = static_cast<uint8_t>(S.color.alpha_test);
     return true;
 }
 
@@ -2722,6 +2711,29 @@ const ShaderInfo* passthrough_tcs_for(const ShaderInfo* vs, const ShaderInfo* te
 }
 const ShaderInfo* tcs_now() { return S.stage[kTessCtl] ? S.stage[kTessCtl] : g_gen_tcs; }
 
+// The game's fixed-function alpha test for this draw: the fragment shader runs as a variant that kills the invocation when the alpha of
+// colour output 0 fails the test, and the reference value reaches it as a push constant (alpha_layout, spirv_alpha_test). [nvn] alpha_test =
+// false: off (A/B). Not for tessellation, stream-out, a pass without a colour target or a dual-source blend.
+const ProgLayout* g_last_draw_pl = nullptr;
+bool g_alpha_draw = false;       // this draw uses the alpha-test layout: build_key sets the key's alpha_func
+bool alpha_test_wanted() {
+    static const bool on = nxrt::config_get_bool("nvn", "alpha_test", true);
+    if (!on || S.color.alpha_test < NVN_ALPHA_FUNC_NEVER || S.color.alpha_test > NVN_ALPHA_FUNC_GEQUAL) return false;
+    if (!S.stage[kFragment] || S.stage[kTessCtl] || S.stage[kTessEval] || g_xfb_active || S.ncolor == 0) return false;
+    auto uses_src1 = [](VkBlendFactor f) {
+        return f == VK_BLEND_FACTOR_SRC1_COLOR || f == VK_BLEND_FACTOR_ONE_MINUS_SRC1_COLOR || f == VK_BLEND_FACTOR_SRC1_ALPHA ||
+               f == VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA;
+    };
+    for (uint32_t i = 0; i < S.ncolor && i < 8; ++i) {
+        if (!((S.color.blend_enable_mask >> i) & 1)) continue;
+        const BlendInfo& b = S.blend[i];
+        if ((b.src_rgb && uses_src1(vk_blend_factor(b.src_rgb))) || (b.dst_rgb && uses_src1(vk_blend_factor(b.dst_rgb))) ||
+            (b.src_a && uses_src1(vk_blend_factor(b.src_a))) || (b.dst_a && uses_src1(vk_blend_factor(b.dst_a))))
+            return false;
+    }
+    return true;
+}
+
 bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* topo_out) {
     rs_start();
     const ShaderInfo* vs = S.stage[kVertex];
@@ -2759,6 +2771,15 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
     }
     const ProgLayout* pl = g_pl;
     if (!pl) return false;
+    g_alpha_draw = false;
+    if (alpha_test_wanted()) {
+        const ProgLayout* ap = alpha_layout(*pl);
+        if (ap != pl) { pl = ap; g_alpha_draw = true; }
+    }
+    if (pl != g_last_draw_pl) {   // another layout than the last draw's (the alpha test came or went): the sets and the pipeline are bound again
+        g_last_draw_pl = pl;
+        g_dirty |= kDesc | kPipe;
+    }
     MemoScope memo(*pl);
     if (pl->has_set[kPoolSet] && pool_state_moved(S.tpool.get(), S.spool.get())) g_dirty |= kDesc;   // registrations or layout moves since
     // Only uniform buffers changed: set 0 is pushed again below and the sets this program bound in this command buffer stay (the textures
@@ -2996,6 +3017,7 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
         g_sets_cb = F->cb;
     }
     rs_mark(kRsSets);
+    if (g_alpha_draw) vkCmdPushConstants(F->cb, pl->layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof S.alpha_ref, &S.alpha_ref);
     if (pl->push_bytes && g_gen_tcs) {
         // the pass-through control shader's tessellation levels (NVN's fixed SetInner/OuterTessellationLevels), every draw: cheap, and
         // the layout may have changed since the last push
@@ -4615,6 +4637,7 @@ void replay_begin_submit(Frame& f) {
     g_bound_pipeline = VK_NULL_HANDLE;
     g_dirty = kAllDirty;
     g_pl = nullptr;
+    g_last_draw_pl = nullptr;
     g_sets_pl = nullptr;
     g_sets_cb = VK_NULL_HANDLE;
     g_pipe = VK_NULL_HANDLE;

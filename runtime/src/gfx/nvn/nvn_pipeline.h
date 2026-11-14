@@ -42,6 +42,9 @@ struct ProgLayout {
     bool has_set[5] = {};
     VkShaderStageFlags push_stages = 0;         // push constant range [0, push_bytes) of generated stages (ShaderInfo::push_bytes); 0 = none
     uint32_t push_bytes = 0;
+    // The alpha-test variant of a program's layout (alpha_layout): the same sets and one more push constant range, FRAGMENT [0, 4) = the
+    // reference of the game's alpha test (spirv_alpha_test reads it). Draws that run the alpha-test fragment variant use this layout.
+    bool alpha_push = false;
     // Set 0 (the uniform buffers) is a push descriptor set ([nvn] push_uniforms): the replay pushes its buffers with each draw that changes
     // them (vkCmdPushDescriptorSetKHR) instead of finding or making a descriptor set for them. Every binding of it is a buffer.
     bool push_set0 = false;
@@ -56,6 +59,8 @@ bool push_uniforms_on();
 
 // Stages by NVN stage index (0 vertex, 1 fragment, 2 geometry, 5 compute); null = absent.
 const ProgLayout* prog_layout(const ShaderInfo* const stages[6]);
+// The layout of `base` with the alpha-test push constant (cached per base; `base` itself when it has push constants of its own).
+const ProgLayout* alpha_layout(const ProgLayout& base);
 
 // Vertex input for the key.
 struct KeyAttr {
@@ -93,9 +98,8 @@ struct GraphicsKey {
     const ShaderInfo* tess[2] = {};
     // After the tessellation stages, so that the prewarm key file keeps its record layout (it records the bytes before them): the fixed-function
     // alpha test of the game ([nvn] alpha_test). alpha_func = NVNalphaFunc 1..7 (0: none / ALWAYS); the fragment shader then runs as a variant
-    // that kills the invocation when the test fails (spirv_alpha_test). alpha_ref_bits = the reference float's bits.
-    uint8_t alpha_func = 0, alpha_pad[3] = {};
-    uint32_t alpha_ref_bits = 0;
+    // that kills the invocation when the test fails (spirv_alpha_test); the reference is a push constant (ProgLayout::alpha_push).
+    uint8_t alpha_func = 0, alpha_pad[7] = {};
     bool operator==(const GraphicsKey& o) const;
     uint64_t hash() const;
 };

@@ -90,10 +90,11 @@ bool spirv_gs_passthrough(const std::vector<uint32_t>& in, const std::vector<Spv
 bool spirv_dual_source_output(const std::vector<uint32_t>& in, std::vector<uint32_t>& out);
 
 // The console's fixed-function alpha test for a fragment shader: before every return of the entry point the alpha of the colour output at
-// Location 0 (a vec4 of 32-bit floats) is compared with the reference value and the invocation is killed when the test fails. `func` is the
-// NVNalphaFunc (1 NEVER, 2 LESS, 3 EQUAL, 4 LEQUAL, 5 GREATER, 6 NOTEQUAL, 7 GEQUAL; ALWAYS needs no variant), `ref_bits` the float's bits.
+// Location 0 (a vec4 of 32-bit floats) is compared with the reference value and the invocation is killed when the test fails. The reference is a float push constant of the
+// fragment stage at offset 0 (ProgLayout::alpha_push, 4 bytes: the replay pushes SetAlphaRef's value). `func` is the
+// NVNalphaFunc (1 NEVER, 2 LESS, 3 EQUAL, 4 LEQUAL, 5 GREATER, 6 NOTEQUAL, 7 GEQUAL; ALWAYS needs no variant).
 // False (out untouched) when the module has no such output or an unexpected shape; the caller then uses the unpatched module.
-bool spirv_alpha_test(const std::vector<uint32_t>& in, uint32_t func, uint32_t ref_bits, std::vector<uint32_t>& out);
+bool spirv_alpha_test(const std::vector<uint32_t>& in, uint32_t func, std::vector<uint32_t>& out);
 
 // A fragment shader of a pass without colour attachments: every Location output becomes a private variable (the decorations go, and
 // the entry point's interface loses them before SPIR-V 1.4). False (out untouched) when no Location output exists or a built-in output
