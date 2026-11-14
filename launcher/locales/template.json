@@ -190,6 +190,7 @@
     "settings.files.frameGen": "",
     "settings.files.dlss": "",
     "settings.files.dlssFrameGen": "",
+    "settings.files.dlssUnused": "",
     "settings.textureDetail.label": "",
     "settings.textureDetail.hint": "",
     "settings.textureDetail.auto": "",

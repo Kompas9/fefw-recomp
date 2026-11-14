@@ -277,6 +277,8 @@ struct UpscalerFiles {
     fsr_framegen: FeatureFiles,
     dlss: FeatureFiles,
     dlss_framegen: FeatureFiles,
+    /// NVIDIA files in the Streamline folder the game does not use (not needed by DLSS, nor by frame generation when it is off)
+    dlss_unused: Vec<String>,
     xess: FeatureFiles,
 }
 
@@ -319,7 +321,7 @@ fn files_in(dirs: &[PathBuf], sets: &[&[&str]], what: &str) -> FeatureFiles {
 }
 
 #[tauri::command]
-fn upscaler_files(app: AppHandle, fsr_dir: String, dlss_dir: String, xess_dir: Option<String>) -> Result<UpscalerFiles, String> {
+fn upscaler_files(app: AppHandle, fsr_dir: String, dlss_dir: String, xess_dir: Option<String>, frame_gen_dlss: Option<bool>) -> Result<UpscalerFiles, String> {
     let cfg = load_config(&app);
     let repo = need_repo(&cfg)?;
     let game = game_dir_of(&cfg, &repo);
@@ -340,11 +342,28 @@ fn upscaler_files(app: AppHandle, fsr_dir: String, dlss_dir: String, xess_dir: O
     const DLSS: [&str; 4] = ["sl.interposer.dll", "sl.common.dll", "sl.dlss.dll", "nvngx_dlss.dll"];
     const DLSS_G: [&str; 9] =
         ["sl.interposer.dll", "sl.common.dll", "sl.dlss.dll", "nvngx_dlss.dll", "sl.dlss_g.dll", "sl.reflex.dll", "sl.pcl.dll", "nvngx_dlssg.dll", "NvLowLatencyVk.dll"];
+    // Files of the Streamline SDK the game never asks for. Streamline skips the plugins, but NVIDIA's NGX still loads a stray nvngx_*.dll it finds
+    // there (nvngx_deepdvc.dll). sl.pcl.dll stays: the game's Streamline needs it. The frame generation files count as unused while it is off.
+    const DLSS_UNUSED: [&str; 7] = ["sl.deepdvc.dll", "sl.directsr.dll", "sl.dlss_d.dll", "sl.nis.dll", "sl.nvperf.dll", "nvngx_deepdvc.dll", "nvngx_dlssd.dll"];
+    const DLSS_UNUSED_NO_FG: [&str; 4] = ["sl.dlss_g.dll", "sl.reflex.dll", "nvngx_dlssg.dll", "NvLowLatencyVk.dll"];
+    let dlss_unused: Vec<String> = match sl_pick.iter().find(|d| d.join("sl.interposer.dll").is_file()) {
+        Some(d) => {
+            let fg = frame_gen_dlss.unwrap_or(false);
+            DLSS_UNUSED
+                .iter()
+                .chain(if fg { [].iter() } else { DLSS_UNUSED_NO_FG.iter() })
+                .filter(|f| d.join(f).is_file())
+                .map(|f| f.to_string())
+                .collect()
+        }
+        None => Vec::new(),
+    };
     Ok(UpscalerFiles {
         fsr_upscaling: files_in(&fsr, &[&["amd_fidelityfx_upscaler_vk.dll"], &["amd_fidelityfx_vk.dll"]], "amd_fidelityfx_upscaler_vk.dll"),
         fsr_framegen: files_in(&fsr, &[&["amd_fidelityfx_vk.dll"]], "amd_fidelityfx_vk.dll (FidelityFX SDK v1.1.4)"),
         dlss: files_in(&sl_pick, &[&DLSS], "the Streamline files"),
         dlss_framegen: files_in(&sl_pick, &[&DLSS_G], "the Streamline frame generation files"),
+        dlss_unused,
         xess: files_in(&xess, &[&["libxess.dll"]], "libxess.dll"),
     })
 }
