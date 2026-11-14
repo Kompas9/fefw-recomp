@@ -4331,10 +4331,10 @@ void run_list(const CmdList& list, int depth) {
                 // TIMESTAMP_TOP is a timestamp too (taken when the command reaches the top of the pipe): its counter word is 0 like TIMESTAMP's
                 const bool stamp = p.type == NVN_COUNTER_TYPE_TIMESTAMP || p.type == NVN_COUNTER_TYPE_TIMESTAMP_TOP;
                 if (!stamp) note_unsupported("statistics counters other than samples passed, primitives generated and feedback primitives written are reported as non-zero");
-                // [nvn] stat_counters = once: such a counter (always reported as 1) is written to each address once; the game asks for the whole
+                // [nvn] stat_counters = once (default): such a counter (always reported as 1) is written to each address once; the game asks for the whole
                 // set about 45 times per frame and the later writes only change the timestamp word.
                 if (!stamp && p.address) {
-                    static const bool once = [] { const bool o = nxrt::config_get_str("nvn", "stat_counters", "always") == "once"; if (o) NXLOG_I("nvn", "statistics counters the runtime does not implement are written once per address ([nvn] stat_counters = once)"); return o; }();
+                    static const bool once = [] { const bool o = nxrt::config_get_str("nvn", "stat_counters", "once") == "once"; if (o) NXLOG_I("nvn", "statistics counters the runtime does not implement are written once per address ([nvn] stat_counters, default once)"); return o; }();
                     static std::unordered_set<uint64_t> written;
                     if (once) {
                         if (written.size() > 4096) written.clear();
