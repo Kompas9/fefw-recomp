@@ -3,7 +3,7 @@
 C++20 library plus CLI (`astc2bc7`) that turns ASTC LDR / sRGB textures (all 14 footprints, 4x4 to 12x12) into BC7, once,
 at setup time, so the renderer never keeps 4 to 9 times larger RGBA8 copies. BCn input is copied through untouched.
 
-Pipeline: ASTC to RGBA8 with ARM astcenc 5.7.0, then BC7 with `bc7e` (from bc7enc_rdo). Both stages are
+Pipeline: ASTC to RGBA8 with ARM astcenc 5.7.1, then BC7 with `bc7e` (from bc7enc_rdo). Both stages are
 multithreaded (decode in bands of block rows, one astcenc context per thread; encode in 64-block chunks).
 
 Two builds of the same library (CMake `A2B_BC7E`, `scripts/build.ps1 [-Ispc]`):
@@ -33,7 +33,7 @@ background re-encode; `runtime/docs/CONFIG.md`).
 ## Build and use
 
 ```powershell
-powershell -File tools\textures\scripts\fetch_third_party.ps1     # astc-encoder 5.7.0, bc7enc_rdo, ISPC 1.32.0 into third_party\
+powershell -File tools\textures\scripts\fetch_third_party.ps1     # astc-encoder 5.7.1, bc7enc_rdo, ISPC 1.32.0 into third_party\
 pwsh -File tools\textures\scripts\build.ps1                       # C++ build: CMake + Ninja + clang-cl (runtime\scripts\env.cmd) -> build\release\astc2bc7.exe
 pwsh -File tools\textures\scripts\build.ps1 -Ispc                 # ISPC build -> build\release\astc2bc7.exe + 3 DLLs (+ bc7e_ispc.lib)
 build\release\astc2bc7.exe in.astc out.dds --srgb [--quality 5] [--threads N] [--dump-rgba f.rgba] [--bench N]
@@ -66,7 +66,7 @@ Library API: `include/astc2bc7.h` (`a2b_transcode`, `a2b_decode_astc_rgba8`, `a2
 ## Stand-in corpus and oracle
 
 Corpus (not committed, under `work\corpus\`): 16 CC0 1K images from ambientCG (albedo, normal, gray, alpha, high-frequency noise;
-`textures_src\MANIFEST.tsv`), encoded with astcenc 5.7.0 `-medium` by `scripts/make_astc_corpus.py` at all 14 block sizes, plus
+`textures_src\MANIFEST.tsv`), encoded with astcenc 5.7.1 `-medium` by `scripts/make_astc_corpus.py` at all 14 block sizes, plus
 odd-size crops (1000x750, 333x257, 31x17) at 4x4, 6x6, 8x8 and 12x12: 260 `.astc` files, with astcenc's own decode as ground truth (`ref_png`).
 
 ```powershell
@@ -102,7 +102,7 @@ SSIM is computed on luma of the RGB channels, also for normal maps, where it is 
 
 | Component | Source | Licence |
 |---|---|---|
-| astcenc 5.7.0 (decoder DLLs, header) | github.com/ARM-software/astc-encoder, tag 5.7.0 | Apache-2.0 (`licenses/LICENSE.astc-encoder.Apache-2.0`) |
+| astcenc 5.7.1 (decoder DLLs, header) | github.com/ARM-software/astc-encoder, tag 5.7.1 | Apache-2.0 (`licenses/LICENSE.astc-encoder.Apache-2.0`) |
 | `bc7e.ispc` | github.com/richgel999/bc7enc_rdo `b9438627`, Binomial LLC | Apache-2.0 (`licenses/LICENSE.bc7enc_rdo`) |
 | `src/bc7e_cpp.h`, `src/bc7e_cpp.cpp` | `bc7e.ispc` above, translated to C++ by `scripts/port_bc7e.py` (a modified version; the files say so) | Apache-2.0 (`licenses/LICENSE.bc7enc_rdo`) |
 | `bc7decomp_ref.cpp` (oracle's `bc7dec` only) | same repo | MIT or public domain, same LICENSE |
