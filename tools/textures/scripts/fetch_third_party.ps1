@@ -4,7 +4,7 @@ $tp = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\third_party'))
 New-Item -ItemType Directory -Force $tp | Out-Null
 if (-not (Test-Path "$tp\astc-encoder")) {
     git clone https://github.com/ARM-software/astc-encoder.git "$tp\astc-encoder"
-    git -C "$tp\astc-encoder" checkout 5.7.0
+    git -C "$tp\astc-encoder" checkout 5.7.1
 }
 if (-not (Test-Path "$tp\bc7enc_rdo")) {
     git clone https://github.com/richgel999/bc7enc_rdo.git "$tp\bc7enc_rdo"
