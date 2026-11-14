@@ -322,12 +322,23 @@ export async function render(el, ctx) {
       .catch(() => null);
     if (seq !== checkSeq || !r) return;
     const line = (name, x) => `${t(name)}: ${x.found ? t('settings.files.found', { detail: x.detail }) : t('settings.files.notFound', { detail: fileDetail(x.detail) })}`;
-    const put = (which, text) => el.querySelectorAll(`[data-status="${which}"]`).forEach((n) => { n.textContent = text; });
+    // `warn`: a sentence appended in red and bold (the files of the Streamline folder the game does not use)
+    const put = (which, text, warn) =>
+      el.querySelectorAll(`[data-status="${which}"]`).forEach((n) => {
+        n.textContent = text;
+        if (warn) {
+          const w = document.createElement('span');
+          w.className = 'status-warn';
+          w.textContent = ` ${warn}`;
+          n.appendChild(w);
+        }
+      });
     put('fsr', `${line('settings.files.upscaling', r.fsr_upscaling)}. ${line('settings.files.frameGen', r.fsr_framegen)}.`);
     // With DLSS chosen (upscaling or frame generation), a folder that holds the rest of the Streamline SDK gets a note about the files this game does not use.
     const dlssOn = model.upscaler === 'dlss' || model.frame_gen === 'dlss';
     const unused = dlssOn && r.dlss.found && Array.isArray(r.dlss_unused) ? r.dlss_unused : [];
-    put('dlss', `${line('settings.files.dlss', r.dlss)}. ${line('settings.files.dlssFrameGen', r.dlss_framegen)}.${unused.length ? ' ' + t('settings.files.dlssUnused', { files: unused.join(', ') }) : ''}`);
+    put('dlss', `${line('settings.files.dlss', r.dlss)}. ${line('settings.files.dlssFrameGen', r.dlss_framegen)}.`,
+      unused.length ? t('settings.files.dlssUnused', { files: unused.join(', ') }) : '');
     if (r.xess) put('xess', `${line('settings.files.xess', r.xess)}.`);
   }
   let checkTimer = 0;
