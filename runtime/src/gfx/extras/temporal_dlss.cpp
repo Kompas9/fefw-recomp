@@ -133,6 +133,21 @@ void on_log(sl::LogType type, const char* msg) {
     // The plugin scan lists every sl.*.dll of the DLSS folder and ignores the ones the host did not ask for; players put the whole Streamline set
     // there, so this warning is a line per unused plugin on every start. Only with [dlss] verbose.
     if (type == sl::LogType::eWarn && m.find("was not requested by the host") != std::string::npos && !config_get_bool("dlss", "verbose", false)) return;
+    // "Ignoring plugin 'sl.dlss' v2.14.16 ('<folder copy>') - duplicate of already-loaded v2.14.16 ('<loaded copy>')": the NVIDIA app's DLSS override
+    // (C:\ProgramData\NVIDIA\NGX\models\sl_*_override_*) was loaded first. That is how the override works, not a problem: an info line.
+    if (type == sl::LogType::eWarn && m.find("duplicate of already-loaded") != std::string::npos) {
+        const size_t a = m.find("Ignoring plugin '"), b = a == std::string::npos ? a : m.find('\'', a + 17);
+        const size_t c = m.rfind("('"), d = m.rfind("')");
+        if (b != std::string::npos && c != std::string::npos && d != std::string::npos && d > c) {
+            const std::string plugin = m.substr(a + 17, b - (a + 17)), loaded = m.substr(c + 2, d - (c + 2));
+            std::string lower = loaded;
+            for (char& ch : lower) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            const bool nvidia = lower.find("ngx") != std::string::npos && lower.find("override") != std::string::npos;
+            NXLOG_I(kTag, "streamline: %s is taken from %s (%s); the copy in the DLSS folder is not used", plugin.c_str(),
+                    nvidia ? "the NVIDIA app's DLSS override" : "an already loaded copy", loaded.c_str());
+            return;
+        }
+    }
     if (type == sl::LogType::eError) NXLOG_E(kTag, "streamline: %s", m.c_str());
     else if (type == sl::LogType::eWarn) NXLOG_W(kTag, "streamline: %s", m.c_str());
     else if (config_get_bool("dlss", "verbose", false)) NXLOG_I(kTag, "streamline: %s", m.c_str());
