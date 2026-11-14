@@ -2456,7 +2456,19 @@ bool build_key(GraphicsKey& key, VkPrimitiveTopology topo) {
         key.logic_op = static_cast<uint8_t>(vk_logic_op(S.color.logic_op));
         for (uint32_t i = 0; i < 8; ++i) key.blend_enable[i] = 0;
     }
-    if (S.color.alpha_test != 0 && S.color.alpha_test != NVN_ALPHA_FUNC_ALWAYS) NVN_LOG_ONCE("alpha-test", "alpha test is enabled by the game: not implemented (needs a shader variant)");
+    // The console's fixed-function alpha test: the fragment shader runs as a variant that kills the invocation when alpha (colour output 0) fails
+    // the test (resolve_stage_modules, spirv_alpha_test). [nvn] alpha_test = false: off (A/B).
+    if (S.color.alpha_test != 0 && S.color.alpha_test != NVN_ALPHA_FUNC_ALWAYS) {
+        static const bool alpha_on = nxrt::config_get_bool("nvn", "alpha_test", true);
+        if (!alpha_on) {
+            NVN_LOG_ONCE("alpha-test", "alpha test is enabled by the game: [nvn] alpha_test = false, not applied");
+        } else if (key.stage[1] && !key.no_out && !key.dual_src && !key.xfb && key.color_format[0] != 0 && S.color.alpha_test >= NVN_ALPHA_FUNC_NEVER && S.color.alpha_test <= NVN_ALPHA_FUNC_GEQUAL) {
+            key.alpha_func = static_cast<uint8_t>(S.color.alpha_test);
+            std::memcpy(&key.alpha_ref_bits, &S.alpha_ref, sizeof key.alpha_ref_bits);
+        } else {
+            NVN_LOG_ONCE("alpha-test", "alpha test is enabled by the game on a draw this runtime does not patch (no fragment shader, no colour output 0, dual-source or stream-out)");
+        }
+    }
     return true;
 }
 

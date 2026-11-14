@@ -91,6 +91,11 @@ struct GraphicsKey {
     // Tessellation control and evaluation stages (null: none). Last, so that the prewarm key file keeps its record layout (it records the bytes
     // before these and never a tessellated key). A key with them has topology PATCH_LIST and patch_control_points = the NVN patch size.
     const ShaderInfo* tess[2] = {};
+    // After the tessellation stages, so that the prewarm key file keeps its record layout (it records the bytes before them): the fixed-function
+    // alpha test of the game ([nvn] alpha_test). alpha_func = NVNalphaFunc 1..7 (0: none / ALWAYS); the fragment shader then runs as a variant
+    // that kills the invocation when the test fails (spirv_alpha_test). alpha_ref_bits = the reference float's bits.
+    uint8_t alpha_func = 0, alpha_pad[3] = {};
+    uint32_t alpha_ref_bits = 0;
     bool operator==(const GraphicsKey& o) const;
     uint64_t hash() const;
 };

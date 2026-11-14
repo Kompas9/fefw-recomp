@@ -338,6 +338,28 @@ static VkShaderModule hdr_fragment_module(const ShaderInfo* fs) {
     return m;
 }
 
+// The fragment shader with the game's alpha test (func, reference) as a kill before each return: one module per shader, function and reference.
+static VkShaderModule alpha_test_module(const ShaderInfo* fs, uint32_t func, uint32_t ref_bits) {
+    std::lock_guard<std::recursive_mutex> lk(g_module_mu);
+    static std::map<std::tuple<const ShaderInfo*, uint32_t, uint32_t>, VkShaderModule> cache;
+    const auto key = std::make_tuple(fs, func, ref_bits);
+    auto it = cache.find(key);
+    if (it != cache.end()) return it->second;
+    VkShaderModule m = VK_NULL_HANDLE;
+    std::vector<uint32_t> patched;
+    if (spirv_alpha_test(fs->spirv, func, ref_bits, patched)) {
+        m = create_module(patched, fs->hash.c_str());
+        float ref;
+        std::memcpy(&ref, &ref_bits, sizeof ref);
+        NXLOG_I(kTag, "%s: alpha test (function %u, reference %g) added to the fragment shader", fs->hash.c_str(), func, static_cast<double>(ref));
+    } else {
+        NXLOG_W(kTag, "%s: alpha test (function %u) is on but the fragment shader has no vec4 float output at Location 0; the unpatched module is used", fs->hash.c_str(), func);
+        m = hdr_fragment_module(fs);
+    }
+    cache[key] = m;
+    return m;
+}
+
 static VkShaderModule dual_source_module(const ShaderInfo* fs) {
     std::lock_guard<std::recursive_mutex> lk(g_module_mu);
     auto it = g_dual_src.find(fs);
@@ -614,6 +636,7 @@ bool resolve_stage_modules(const GraphicsKey& key, StageModules* out) {
                            : (i == 0 && !int_slots.empty()) ? producer_module(key.stage[i], nullptr, int_slots)
                            : (i == 1 && key.no_out)      ? no_output_module(key.stage[i])
                            : (i == 1 && key.dual_src)    ? dual_source_module(key.stage[i])
+                           : (i == 1 && key.alpha_func) ? alpha_test_module(key.stage[i], key.alpha_func, key.alpha_ref_bits)
                            : (i == 1)                    ? hdr_fragment_module(key.stage[i])
                                                          : shader_module(key.stage[i]);
         if (!m) return false;
