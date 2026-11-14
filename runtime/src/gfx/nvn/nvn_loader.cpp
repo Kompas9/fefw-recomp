@@ -181,7 +181,12 @@ uint64_t proc_address(const char* name) {
         if (fn) return hle_register(name, fn);
     }
     if (std::strncmp(name, "nvn", 3) == 0 && unknown_policy() == UnknownPolicy::Stub) {
-        NXLOG_W(kTag, "UNKNOWN NVN PROC requested by name: %s (not in the table): handing out a logging stub", name);
+        // The game's NVN SDK asks for about 120 functions this table does not have (ray tracing, dirty tile maps, acquire timeouts, ...), three
+        // times each, at start. Calling one is logged as a warning by stub_handler; the requests are only listed at trace level.
+        static std::atomic<bool> noted{false};
+        if (!noted.exchange(true))
+            NXLOG_I(kTag, "NVN functions the game asks for by name that the table does not have get a logging stub; a call to one is logged as UNKNOWN NVN PROC (names at trace level)");
+        NXLOG_T(kTag, "NVN proc requested by name: %s (not in the table): logging stub", name);
         return hle_register(name, stub_handler);
     }
     NXLOG_W(kTag, "NVN proc %s requested: not in the table, answering null", name);
