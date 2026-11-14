@@ -1,6 +1,9 @@
 import { api, errText } from './util.js';
 
 /** The launcher's update state, shared by the nav and the About page. */
+/** The update check, the update card on the About page and the check at start are off for now (no release feed to read yet). */
+export const UPDATES_ENABLED = false;
+
 export const upd = {
   check: null, // the last check_update answer
   checking: false,

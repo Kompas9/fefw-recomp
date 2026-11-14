@@ -21,7 +21,7 @@ set_property(CACHE A2B_BC7E PROPERTY STRINGS cpp ispc)
 if(A2B_BC7E STREQUAL "ispc")
     set(A2B_ISPC "${TP}/ispc/ispc-v1.32.0-windows/bin/ispc.exe" CACHE FILEPATH "Intel ISPC compiler (BSD-3)")
 
-    # ---- ARM astcenc 5.7.0 (Apache-2.0): decoder-only DLLs, one per ISA, picked at run time by CPUID
+    # ---- ARM astcenc 5.7.1 (Apache-2.0): decoder-only DLLs, one per ISA, picked at run time by CPUID
     set(ASTCENC_CLI OFF CACHE BOOL "" FORCE)
     set(ASTCENC_DECOMPRESSOR ON CACHE BOOL "" FORCE)
     set(ASTCENC_SHAREDLIB ON CACHE BOOL "" FORCE)
