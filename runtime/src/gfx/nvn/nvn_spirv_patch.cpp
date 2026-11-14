@@ -3,6 +3,7 @@
 #include "nvn_spirv_patch.h"
 
 #include <cstring>
+#include <iterator>
 #include <map>
 
 namespace nxrt::nvn::be::gpu {
@@ -1144,6 +1145,131 @@ std::vector<SpvIntSampler> spirv_predict_int_fetches(const std::vector<uint32_t>
     for (uint32_t v : vars)
         if (has_fetch.count(v) && !bad.count(v)) slots.push_back({set_of[v], binding_of[v], false});
     return slots;
+}
+
+}  // namespace nxrt::nvn::be::gpu
+
+namespace nxrt::nvn::be::gpu {
+
+bool spirv_alpha_test(const std::vector<uint32_t>& in, uint32_t func, std::vector<uint32_t>& out) {
+    enum : uint32_t { OpEntryPointOp = 15, OpTypeIntOp = 21, OpTypeBoolOp = 20, OpTypeFloatOp = 22, OpTypeVectorOp = 23, OpTypeStructOp = 30,
+                      OpTypePointerOp = 32, OpConstantOp = 43, OpFunctionOp = 54, OpFunctionEndOp = 56, OpVariableOp = 59, OpLoadOp = 61,
+                      OpAccessChainOp = 65, OpDecorateOp = 71, OpMemberDecorateOp = 72, OpCompositeExtractOp = 81, OpFOrdEqualOp = 180,
+                      OpFOrdNotEqualOp = 182, OpFOrdLessThanOp = 184, OpFOrdGreaterThanOp = 186, OpFOrdLessThanEqualOp = 188,
+                      OpFOrdGreaterThanEqualOp = 190, OpSelectionMergeOp = 247, OpLabelOp = 248, OpBranchConditionalOp = 250, OpKillOp = 252,
+                      OpReturnOp = 253, DecBlock = 2, DecOffset = 35, DecLocation = 30, DecIndex = 32, DecComponent = 31, StorageOutput = 3,
+                      StoragePushConstant = 9, ModelFragment = 4 };
+    if (in.size() < 5 || func < 1 || func > 7) return false;
+    std::vector<Inst> insts;
+    for (size_t i = 5; i < in.size();) {
+        const uint32_t len = in[i] >> 16;
+        if (!len || i + len > in.size()) return false;
+        insts.push_back({i, in[i] & 0xffff, len});
+        i += len;
+    }
+    uint32_t bound = in[3], f32 = 0, boolean = 0, int32 = 0, int_zero = 0, entry_func = 0;
+    uint32_t entries = 0;
+    size_t first_function = 0, first_type = 0;
+    std::map<uint32_t, std::pair<uint32_t, uint32_t>> vec_parts, ptr_of;     // vector -> (component, count); pointer -> (storage, pointee)
+    std::map<uint32_t, uint32_t> location, index, component;
+    std::vector<std::pair<uint32_t, uint32_t>> outputs;                        // (variable, pointer type)
+    for (const Inst& n : insts) {
+        const uint32_t* w = &in[n.at];
+        if (n.op == OpFunctionOp) { if (!first_function) first_function = n.at; continue; }
+        if (first_function) continue;
+        if (!first_type && n.op >= 19 && n.op < OpDecorateOp) first_type = n.at;   // the annotations end where the type declarations start
+        if (n.op == OpEntryPointOp && n.len >= 4) { if (!entries++ && w[1] == ModelFragment) entry_func = w[2]; }
+        else if (n.op == OpTypeFloatOp && n.len >= 3 && w[2] == 32) f32 = w[1];
+        else if (n.op == OpTypeBoolOp && n.len == 2) boolean = w[1];
+        else if (n.op == OpTypeIntOp && n.len == 4 && w[2] == 32 && w[3] == 1) int32 = w[1];
+        else if (n.op == OpTypeVectorOp && n.len == 4) vec_parts[w[1]] = {w[2], w[3]};
+        else if (n.op == OpTypePointerOp && n.len == 4) ptr_of[w[1]] = {w[2], w[3]};
+        else if (n.op == OpDecorateOp && n.len >= 4 && w[2] == DecLocation) location[w[1]] = w[3];
+        else if (n.op == OpDecorateOp && n.len >= 4 && w[2] == DecIndex) index[w[1]] = w[3];
+        else if (n.op == OpDecorateOp && n.len >= 4 && w[2] == DecComponent) component[w[1]] = w[3];
+        else if (n.op == OpVariableOp && n.len >= 4 && w[3] == StorageOutput) outputs.emplace_back(w[2], w[1]);
+        else if (n.op == OpVariableOp && n.len >= 4 && w[3] == StoragePushConstant) return false;   // the module has its own push constants
+    }
+    if (entries != 1 || !entry_func || !f32 || !first_function || !first_type) return false;
+    for (const Inst& n : insts)                                              // an OpConstant 0 of the 32-bit signed type, when there is one
+        if (n.at < first_function && n.op == OpConstantOp && n.len == 4 && int32 && in[n.at + 1] == int32 && in[n.at + 3] == 0) int_zero = in[n.at + 2];
+    uint32_t var = 0, vec4 = 0;
+    for (const auto& [v, pt] : outputs) {
+        auto l = location.find(v);
+        if (l == location.end() || l->second != 0) continue;
+        if ((index.count(v) && index[v] != 0) || (component.count(v) && component[v] != 0)) continue;
+        auto p = ptr_of.find(pt);
+        if (p == ptr_of.end() || p->second.first != StorageOutput) continue;
+        auto vp = vec_parts.find(p->second.second);
+        if (vp == vec_parts.end() || vp->second.first != f32 || vp->second.second != 4) continue;
+        var = v;
+        vec4 = p->second.second;
+        break;
+    }
+    if (!var) return false;
+    // New declarations, before the first function: a push constant block { float alpha_ref; } (offset 0, the fragment stage's range of the
+    // alpha-test pipeline layout) and what it needs. Its decorations go where the annotations end.
+    std::vector<uint32_t> decls, annots;
+    if (!boolean) {
+        boolean = bound++;
+        decls.insert(decls.end(), {(2u << 16) | OpTypeBoolOp, boolean});
+    }
+    if (!int32) {
+        int32 = bound++;
+        decls.insert(decls.end(), {(4u << 16) | OpTypeIntOp, int32, 32u, 1u});
+    }
+    if (!int_zero) {
+        int_zero = bound++;
+        decls.insert(decls.end(), {(4u << 16) | OpConstantOp, int32, int_zero, 0u});
+    }
+    const uint32_t block = bound++, ptr_block = bound++, ptr_float = bound++, pc_var = bound++;
+    annots.insert(annots.end(), {(3u << 16) | OpDecorateOp, block, DecBlock, (5u << 16) | OpMemberDecorateOp, block, 0u, DecOffset, 0u});
+    decls.insert(decls.end(), {(3u << 16) | OpTypeStructOp, block, f32});
+    decls.insert(decls.end(), {(4u << 16) | OpTypePointerOp, ptr_block, StoragePushConstant, block});
+    decls.insert(decls.end(), {(4u << 16) | OpTypePointerOp, ptr_float, StoragePushConstant, f32});
+    decls.insert(decls.end(), {(4u << 16) | OpVariableOp, ptr_block, pc_var, StoragePushConstant});
+    uint32_t cmp = 0;
+    switch (func) {
+        case 1: cmp = OpFOrdLessThanOp; break;             // NEVER: a < a is false
+        case 2: cmp = OpFOrdLessThanOp; break;
+        case 3: cmp = OpFOrdEqualOp; break;
+        case 4: cmp = OpFOrdLessThanEqualOp; break;
+        case 5: cmp = OpFOrdGreaterThanOp; break;
+        case 6: cmp = OpFOrdNotEqualOp; break;
+        default: cmp = OpFOrdGreaterThanEqualOp; break;
+    }
+    out.clear();
+    out.reserve(in.size() + decls.size() + annots.size() + 48);
+    out.insert(out.end(), in.begin(), in.begin() + 5);
+    bool in_entry = false;
+    uint32_t returns = 0;
+    for (const Inst& n : insts) {
+        const uint32_t* w = &in[n.at];
+        if (n.at == first_type) out.insert(out.end(), annots.begin(), annots.end());
+        if (n.at == first_function) out.insert(out.end(), decls.begin(), decls.end());
+        if (n.op == OpFunctionOp) in_entry = w[2] == entry_func;
+        else if (n.op == OpFunctionEndOp) in_entry = false;
+        if (in_entry && n.op == OpReturnOp) {
+            const uint32_t v = bound++, a = bound++, rp = bound++, r = bound++, c = bound++, merge = bound++, kill = bound++;
+            const uint32_t rhs = func == 1 ? a : r;
+            const uint32_t seq[] = {(4u << 16) | OpLoadOp, vec4, v, var,
+                                    (5u << 16) | OpCompositeExtractOp, f32, a, v, 3,
+                                    (5u << 16) | OpAccessChainOp, ptr_float, rp, pc_var, int_zero,
+                                    (4u << 16) | OpLoadOp, f32, r, rp,
+                                    (5u << 16) | cmp, boolean, c, a, rhs,
+                                    (3u << 16) | OpSelectionMergeOp, merge, 0,
+                                    (4u << 16) | OpBranchConditionalOp, c, merge, kill,
+                                    (2u << 16) | OpLabelOp, kill,
+                                    (1u << 16) | OpKillOp,
+                                    (2u << 16) | OpLabelOp, merge};
+            out.insert(out.end(), std::begin(seq), std::end(seq));
+            ++returns;
+        }
+        out.insert(out.end(), in.begin() + static_cast<std::ptrdiff_t>(n.at), in.begin() + static_cast<std::ptrdiff_t>(n.at + n.len));
+    }
+    if (!returns) return false;
+    out[3] = bound;
+    return true;
 }
 
 }  // namespace nxrt::nvn::be::gpu

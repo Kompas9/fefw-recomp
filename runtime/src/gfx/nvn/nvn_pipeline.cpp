@@ -51,6 +51,7 @@ std::map<LayoutKey, ProgLayout> g_layouts;
 // the same signature get the same VkPipelineLayout handle, so the shader parts compiled for one are found again for the other.
 struct SharedLayout { VkDescriptorSetLayout sets[5] = {}; VkPipelineLayout layout = VK_NULL_HANDLE; };
 std::map<std::string, SharedLayout> g_shared_layouts;
+std::map<const ProgLayout*, ProgLayout> g_alpha_layouts;   // alpha_layout, under g_layout_mu
 std::unordered_map<const ShaderInfo*, VkShaderModule> g_modules;
 std::mutex g_module_id_mu;
 std::unordered_map<VkShaderModule, SubgroupShader> g_module_subgroups;
@@ -338,6 +339,26 @@ static VkShaderModule hdr_fragment_module(const ShaderInfo* fs) {
     return m;
 }
 
+// The fragment shader with the game's alpha test (func; the reference is a push constant) as a kill before each return: one module per shader and function.
+static VkShaderModule alpha_test_module(const ShaderInfo* fs, uint32_t func) {
+    std::lock_guard<std::recursive_mutex> lk(g_module_mu);
+    static std::map<std::pair<const ShaderInfo*, uint32_t>, VkShaderModule> cache;
+    const auto key = std::make_pair(fs, func);
+    auto it = cache.find(key);
+    if (it != cache.end()) return it->second;
+    VkShaderModule m = VK_NULL_HANDLE;
+    std::vector<uint32_t> patched;
+    if (spirv_alpha_test(fs->spirv, func, patched)) {
+        m = create_module(patched, fs->hash.c_str());
+        NXLOG_I(kTag, "%s: alpha test (function %u, reference from a push constant) added to the fragment shader", fs->hash.c_str(), func);
+    } else {
+        NXLOG_W(kTag, "%s: alpha test (function %u) is on but the fragment shader has no vec4 float output at Location 0; the unpatched module is used", fs->hash.c_str(), func);
+        m = hdr_fragment_module(fs);
+    }
+    cache[key] = m;
+    return m;
+}
+
 static VkShaderModule dual_source_module(const ShaderInfo* fs) {
     std::lock_guard<std::recursive_mutex> lk(g_module_mu);
     auto it = g_dual_src.find(fs);
@@ -614,6 +635,7 @@ bool resolve_stage_modules(const GraphicsKey& key, StageModules* out) {
                            : (i == 0 && !int_slots.empty()) ? producer_module(key.stage[i], nullptr, int_slots)
                            : (i == 1 && key.no_out)      ? no_output_module(key.stage[i])
                            : (i == 1 && key.dual_src)    ? dual_source_module(key.stage[i])
+                           : (i == 1 && key.alpha_func) ? alpha_test_module(key.stage[i], key.alpha_func)
                            : (i == 1)                    ? hdr_fragment_module(key.stage[i])
                                                          : shader_module(key.stage[i]);
         if (!m) return false;
@@ -628,6 +650,28 @@ bool resolve_stage_modules(const GraphicsKey& key, StageModules* out) {
         out->m[3 + t] = m;
     }
     return true;
+}
+
+const ProgLayout* alpha_layout(const ProgLayout& base) {
+    if (base.push_bytes || base.alpha_push) return &base;   // a generated stage's push constants already use the range: no variant
+    std::lock_guard<std::mutex> lk(g_layout_mu);
+    auto it = g_alpha_layouts.find(&base);
+    if (it != g_alpha_layouts.end()) return &it->second;
+    const VkPushConstantRange pcr = {VK_SHADER_STAGE_FRAGMENT_BIT, 0, 4};
+    VkPipelineLayoutCreateInfo pci = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    pci.setLayoutCount = base.sets[kPoolSet] ? 5 : 4;
+    pci.pSetLayouts = base.sets;
+    pci.pushConstantRangeCount = 1;
+    pci.pPushConstantRanges = &pcr;
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+    if (vkCreatePipelineLayout(vkdev(), &pci, nullptr, &layout) != VK_SUCCESS) {
+        NXLOG_E(kTag, "alpha test pipeline layout failed: the draws run without the alpha test");
+        return &base;
+    }
+    ProgLayout a = base;
+    a.layout = layout;
+    a.alpha_push = true;
+    return &g_alpha_layouts.emplace(&base, std::move(a)).first->second;
 }
 
 const VkPipelineDynamicStateCreateInfo* pipeline_dynamic_state() {
@@ -1716,6 +1760,9 @@ void pipeline_shutdown() {
         if (m) vkDestroyShaderModule(d, m, nullptr);
     g_int_samplers.clear();
     g_compute_keys.sub(g_compute_keys.get());
+    for (auto& [k, a] : g_alpha_layouts)
+        if (a.layout) vkDestroyPipelineLayout(d, a.layout, nullptr);
+    g_alpha_layouts.clear();
     g_layouts.clear();
     for (auto& [k, l] : g_shared_layouts) {          // the handles in g_layouts were copies of these
         if (l.layout) vkDestroyPipelineLayout(d, l.layout, nullptr);
