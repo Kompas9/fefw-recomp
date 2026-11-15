@@ -27,7 +27,9 @@ each stage), cuda_kernels.tsv (kernel name, module and launch data per CUDA bloc
 Deterministic: files and entries are visited in sorted order; "first occurrence" is in that order.
 zstd: Python 3.14's compression.zstd, else the zstandard package, else an external zstd or 7-Zip (--zstd <exe>, or
 zstd/7z on PATH).
-Usage: python -I extract_corpus.py --romfs <romfs> [--main <main>] [--exefs <dir>] --out <dir> [--jobs 4] [--zstd <exe>]
+--programs-bin <file> also writes the runtime's program list: the distinct vertex + fragment (+ geometry) pairs of programs.tsv as "MPRPRG01", a u32
+count, a u32 0 and three u64 code hashes per program. The game's shader preparation (fefw.exe --prepare-shaders) compiles those ahead of play.
+Usage: python -I extract_corpus.py --romfs <romfs> [--main <main>] [--exefs <dir>] --out <dir> [--jobs 4] [--zstd <exe>] [--programs-bin <file>]
 """
 import argparse, collections, hashlib, mmap, os, shutil, struct, subprocess, sys, zlib
 from concurrent.futures import ProcessPoolExecutor
@@ -465,6 +467,7 @@ def main():
     ap.add_argument('--out', required=True)
     ap.add_argument('--jobs', type=int, default=4)
     ap.add_argument('--zstd', help='zstd or 7-Zip executable for *.zst files (when Python has no zstd module)')
+    ap.add_argument('--programs-bin', help="also write the runtime's program list for the shader preparation to this file")
     ap.add_argument('--progress', action='store_true', help='print "scan: <done> <total>" lines while scanning')
     a = ap.parse_args()
     ZSTD_TOOL = find_zstd_tool(a.zstd)
@@ -527,6 +530,18 @@ def main():
         f.write('source\tbnsh_off\tvariation\tstages\n')
         for name, base, v, st in progs:
             f.write(f'{name}\t{base:#x}\t{v}\t{st}\n')
+    if a.programs_bin:
+        pairs = set()
+        for name, base, v, st in progs:
+            d = dict(x.split('=', 1) for x in st.split())
+            if 'vs' in d and 'ps' in d:
+                pairs.add((int(d['vs'], 16), int(d['ps'], 16), int(d['gs'], 16) if 'gs' in d else 0))
+        pairs = sorted(pairs)
+        os.makedirs(os.path.dirname(os.path.abspath(a.programs_bin)), exist_ok=True)
+        with open(a.programs_bin, 'wb') as f:
+            f.write(b'MPRPRG01' + struct.pack('<II', len(pairs), 0))
+            for vs, ps, gs in pairs:
+                f.write(struct.pack('<QQQ', vs, ps, gs))
     with open(os.path.join(a.out, 'cuda_kernels.tsv'), 'w', newline='\n') as f:
         f.write('code_sha1_16\tkernel\tsource\tfatbin_off\telf_off\tsm\tparam_off\tparam_size\tshared\tmax_threads\treqntid'
                 '\tregs\tbank4\n')
