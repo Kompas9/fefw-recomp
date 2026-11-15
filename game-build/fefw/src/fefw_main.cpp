@@ -291,11 +291,47 @@ int main(int argc, char** argv) {
 #endif
 
 namespace {
+// --prepare-shaders: compiles the shader parts of every program in shader_cache/programs.bin on this GPU and driver, so the first play session has
+// none to compile (the driver keeps them in its cache, [nvn] prepare_cache also in pipeline_cache.bin). The launcher reads the "prepare:" lines.
+int run_prepare(bool if_needed, bool force) {
+    nxrt::nvn::ShaderPrepareOptions o;
+    o.only_if_needed = if_needed;
+    o.force = force;
+    uint64_t last = ~0ull;
+    o.progress = [&](uint64_t done, uint64_t total) {
+        nxrt::diag_progress();      // no frames are drawn here: keeps the freeze watchdog quiet while the work moves
+        if (done != last && (done == total || last == ~0ull || done - last >= (total / 200 ? total / 200 : 1))) {
+            std::printf("prepare: %llu %llu\n", static_cast<unsigned long long>(done), static_cast<unsigned long long>(total));
+            std::fflush(stdout);
+            last = done;
+        }
+        return true;
+    };
+    nxrt::nvn::ShaderPrepareResult r;
+    const bool ok = nxrt::nvn::prepare_shaders(o, &r);
+    int code = 0;
+    if (!ok) {
+        std::printf("prepare: error %s\n", r.error.c_str());
+        code = 1;
+    } else if (r.already_ready) {
+        std::printf("prepare: ready\n");
+    } else {
+        std::printf("prepare: done programs=%llu prepared=%llu missing=%llu failed=%llu parts=%llu fast=%llu seconds=%.1f%s\n",
+                    static_cast<unsigned long long>(r.programs), static_cast<unsigned long long>(r.prepared), static_cast<unsigned long long>(r.missing_shaders),
+                    static_cast<unsigned long long>(r.failed), static_cast<unsigned long long>(r.parts), static_cast<unsigned long long>(r.fast_parts), r.seconds,
+                    r.cancelled ? " cancelled" : "");
+    }
+    std::fflush(stdout);
+    NXLOG_I("boot", "shader preparation: %s", ok ? (r.already_ready ? "already ready" : "finished") : r.error.c_str());
+    return code;
+}
+
 int fefw_run(int argc, char** argv) {
     nxrt_register_game_fefw();           // before anything reads it (nxrt::init, the services): docs/GAME_BOUNDARY.md
     std::string exefs_arg, main_arg, romfs_arg;
     const char* ini = nullptr;
     const char* logp = nullptr;
+    bool prepare_mode = false, prepare_if_needed = false, prepare_force = false;
     std::vector<std::pair<std::string, std::string>> boot_opts;   // [boot] keys from the command line, applied after nxrt::init() loads the ini
     for (int i = 1; i < argc; i++) {
         auto arg = [&](const char* n) { return !std::strcmp(argv[i], n) && i + 1 < argc; };
@@ -306,6 +342,9 @@ int fefw_run(int argc, char** argv) {
         else if (arg("--log")) logp = argv[++i];
         else if (arg("--max-seconds")) boot_opts.emplace_back("max_seconds", argv[++i]);
         else if (arg("--link")) boot_opts.emplace_back("link", argv[++i]);
+        else if (!std::strcmp(argv[i], "--prepare-shaders")) { prepare_mode = true; boot_opts.emplace_back("gfx", "headless"); }
+        else if (!std::strcmp(argv[i], "--if-needed")) prepare_if_needed = true;
+        else if (!std::strcmp(argv[i], "--force")) prepare_force = true;
         else if (!std::strcmp(argv[i], "--no-nvn")) boot_opts.emplace_back("nvn", "0");
         else if (!std::strcmp(argv[i], "--headless")) boot_opts.emplace_back("gfx", "headless");
         else if (!std::strcmp(argv[i], "--window")) boot_opts.emplace_back("gfx", "window");
@@ -368,6 +407,13 @@ int fefw_run(int argc, char** argv) {
             }
             if (!nxrt::nvn::install_backend(bd)) die("NVN back end failed to start (see the log)");
             NXLOG_I("boot", "NVN back end running on %s (%s)", g_gfx_device->gpu().name.c_str(), headless ? "headless" : "window");
+            if (prepare_mode) {
+                const int code = run_prepare(prepare_if_needed, prepare_force);
+                nxrt::log_flush();
+                // the result and the caches are written; no guest ever ran, so the normal teardown has nothing to wait for (and aborted in a test)
+                TerminateProcess(GetCurrentProcess(), static_cast<UINT>(code));
+                return code;
+            }
             nxrt::play::StartOptions po;
             po.device = g_gfx_device.get();
             po.renderer = g_gfx_renderer.get();
