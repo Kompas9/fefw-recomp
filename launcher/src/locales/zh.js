@@ -121,6 +121,7 @@ export const zh = {
     'setup.step.harness': 'shader 翻译器',
     'setup.step.shaders': '翻译 shader',
     'setup.step.ini': '写入 fefw.ini',
+    'setup.step.prepare': '为你的 GPU 预编译 shader',
     'setup.check.decrypted': 'exefs/main 已解密',
     'setup.check.version': '受支持的版本（{version}）',
     'setup.err.noFolder': '还没有选择文件夹。',

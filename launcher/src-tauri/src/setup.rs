@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-pub const STEPS: [(&str, &str); 8] = [
+pub const STEPS: [(&str, &str); 9] = [
     ("python", "Python environment"),
     ("exefs", "Game code from your dump"),
     ("lift", "Recompile the game code"),
@@ -33,13 +33,15 @@ pub const STEPS: [(&str, &str); 8] = [
     ("harness", "Shader translator"),
     ("shaders", "Translate the shaders"),
     ("ini", "Write fefw.ini"),
+    ("prepare", "Prepare the shaders for your GPU"),
 ];
 
 /// The steps of the release package (no toolchain on the player's PC: the bundled Python and Zig build fefw.exe).
-pub const PACKAGE_STEPS: [(&str, &str); 3] = [
+pub const PACKAGE_STEPS: [(&str, &str); 4] = [
     ("build", "Recompile the game code from your dump"),
     ("shaders", "Translate the shaders"),
     ("ini", "Write fefw.ini"),
+    ("prepare", "Prepare the shaders for your GPU"),
 ];
 
 /// Every path the setup and Play use, derived from the checkout (or the release package), the dump and the run folder.
@@ -114,6 +116,14 @@ impl Paths {
             Some(_) => self.in_game(&["shader_cache", "bc7"]),
             None => self.repo.join("work").join("bc7_cache"),
         }
+    }
+    /// The list of the game's shader programs (written by the extractor), which fefw.exe --prepare-shaders compiles; the runtime reads
+    /// it from the folder above the SPIR-V folder, and writes prepare.state and (when it gives up) this launcher writes prepare.skipped there.
+    pub fn programs_bin(&self) -> PathBuf {
+        self.spirv().parent().map(|d| d.join("programs.bin")).unwrap_or_else(|| self.spirv().join("programs.bin"))
+    }
+    fn prepare_file(&self, name: &str) -> PathBuf {
+        self.spirv().parent().map(|d| d.join(name)).unwrap_or_else(|| self.spirv().join(name))
     }
     fn shader_stamp(&self) -> PathBuf {
         match &self.package {
@@ -263,6 +273,13 @@ fn shaders_ok(p: &Paths) -> bool {
         && v["romfs"].as_str() == Some(crate::dump::fwd(&p.romfs).as_str())
 }
 
+/// The shader preparation has finished for some GPU and driver (the runtime's prepare.state says "complete: 1"), or was given up on.
+/// Whether it is still current for this GPU and driver is the runtime's check (fefw.exe --prepare-shaders --if-needed, instant when it is).
+fn prepare_ok(p: &Paths) -> bool {
+    p.prepare_file("prepare.skipped").is_file()
+        || fs::read_to_string(p.prepare_file("prepare.state")).map(|s| s.lines().any(|l| l.trim() == "complete: 1")).unwrap_or(false)
+}
+
 /// What is done already, step by step (the page's checklist).
 pub fn steps(p: &Paths, running: Option<&str>) -> Vec<StepState> {
     let list: &[(&str, &str)] = if p.package.is_some() { &PACKAGE_STEPS } else { &STEPS };
@@ -276,6 +293,7 @@ pub fn steps(p: &Paths, running: Option<&str>) -> Vec<StepState> {
         "harness" => p.harness().is_file() && shaders_ok(p),
         "shaders" => shaders_ok(p),
         "ini" => crate::settings::play_paths_ok(&p.game_dir, p),
+        "prepare" => prepare_ok(p),
         _ => false,
     };
     list
@@ -290,7 +308,8 @@ pub fn steps(p: &Paths, running: Option<&str>) -> Vec<StepState> {
 }
 
 pub fn complete(p: &Paths) -> bool {
-    steps(p, None).iter().all(|s| s.state == "done")
+    // the shader preparation only saves compile time while playing: a game that has not been prepared (yet) is still playable
+    steps(p, None).iter().all(|s| s.state == "done" || s.id == "prepare")
 }
 
 /// A program started from the AppImage gets the host's environment, not the AppImage's: its AppRun points PYTHONHOME, GTK_*,
@@ -380,7 +399,7 @@ fn tool_progress(line: &str) -> Option<(u64, u64)> {
         let mut it = rest.split_whitespace().skip(1);
         return Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?));
     }
-    if let Some(rest) = line.strip_prefix("scan: ") {
+    if let Some(rest) = line.strip_prefix("scan: ").or_else(|| line.strip_prefix("prepare: ")) {
         let mut it = rest.split_whitespace();
         return Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?));
     }
@@ -591,7 +610,7 @@ fn run_package_steps(r: &Runner, p: &Paths, tools: &Path, jobs: usize) -> Result
     }
     r.progress("ini", 0, 0, "Writing fefw.ini");
     crate::settings::ensure_play_paths(&p.game_dir, p)?;
-    Ok(true)
+    prepare_step(r, p, jobs)
 }
 
 /// Size and modification time of a file ("" when missing): enough to tell that it was replaced.
@@ -646,6 +665,7 @@ fn shader_steps(r: &Runner, p: &Paths, jobs: usize, cwd: &Path) -> Result<bool, 
         let mut c = Command::new(p.python());
         c.arg("-I").arg(p.extractor()).arg("--romfs").arg(&p.romfs).arg("--main").arg(p.plain_exefs().join("main"));
         c.arg("--exefs").arg(p.plain_exefs()).arg("--out").arg(p.corpus()).args(["--jobs", &jobs.min(8).to_string(), "--progress"]);
+        c.arg("--programs-bin").arg(p.programs_bin());
         if !r.run("shaders", "Finding the shaders in your romfs", c, cwd)? {
             return Ok(false);
         }
@@ -688,6 +708,50 @@ fn shader_steps(r: &Runner, p: &Paths, jobs: usize, cwd: &Path) -> Result<bool, 
     // the corpus is only the extractor's output for the translator: several GB the game never reads
     let _ = fs::remove_dir_all(p.corpus());
     Ok(true)
+}
+
+/// Compiles the shader parts of every program of the game on this GPU and driver (fefw.exe --prepare-shaders), so the first play session has no
+/// shader to compile. Needs the translated shaders and fefw.ini. It saves time and nothing else: when it cannot run or fails, Set up goes on
+/// (the game then compiles while it is played) and the step is marked given up. Instant when the runtime's state file says this GPU and driver
+/// were prepared already (--if-needed).
+fn prepare_step(r: &Runner, p: &Paths, jobs: usize) -> Result<bool, String> {
+    if !p.exe().is_file() || !shaders_ok(p) || r.shared.cancel.load(Ordering::SeqCst) {
+        return Ok(!r.shared.cancel.load(Ordering::SeqCst));
+    }
+    let skipped = p.prepare_file("prepare.skipped");
+    let _ = fs::remove_file(&skipped);
+    let give_up = |what: String| {
+        r.log(vec![format!("Shader preparation skipped ({what}). The game compiles shaders while you play instead; Set up tries again next time.")]);
+        let _ = fs::write(&skipped, what);
+    };
+    if !p.programs_bin().is_file() {
+        // a Set up from before the list existed: list the programs again (about half a minute), keeping nothing else of the extraction
+        let tmp = p.prepare_file("programs-tmp");
+        let mut c = Command::new(p.python());
+        c.arg("-I").arg(p.extractor()).arg("--romfs").arg(&p.romfs).arg("--main").arg(p.plain_exefs().join("main"));
+        c.arg("--exefs").arg(p.plain_exefs()).arg("--out").arg(&tmp).args(["--jobs", &jobs.min(8).to_string()]);
+        c.arg("--programs-bin").arg(p.programs_bin());
+        let res = r.run("prepare", "Listing the game's shader programs", c, &p.game_dir);
+        let _ = fs::remove_dir_all(&tmp);
+        match res {
+            Ok(true) => {}
+            Ok(false) => return Ok(false),
+            Err(e) => {
+                give_up(format!("the program list could not be made: {}", e.lines().next().unwrap_or("")));
+                return Ok(true);
+            }
+        }
+    }
+    let mut c = Command::new(p.exe());
+    c.args(["--prepare-shaders", "--if-needed"]);
+    match r.run("prepare", "Preparing the shaders for your GPU (a minute or two, once)", c, &p.game_dir) {
+        Ok(true) => Ok(true),
+        Ok(false) => Ok(false),
+        Err(e) => {
+            give_up(format!("fefw.exe --prepare-shaders failed: {}", e.lines().next().unwrap_or("")));
+            Ok(true)
+        }
+    }
 }
 
 fn run_steps(r: &Runner, p: &Paths, jobs: usize) -> Result<bool, String> {
@@ -774,7 +838,7 @@ fn run_steps(r: &Runner, p: &Paths, jobs: usize) -> Result<bool, String> {
     r.progress("ini", 0, 0, "Writing fefw.ini");
     crate::settings::ensure_play_paths(&p.game_dir, p)?;
     r.log(vec![format!("fefw.ini is in {}", crate::dump::fwd(&p.game_dir))]);
-    Ok(true)
+    prepare_step(r, p, jobs)
 }
 
 /// Runs the whole setup on this thread. Returns the final progress (done, cancelled or error).
@@ -805,5 +869,8 @@ mod tests {
         assert_eq!(ninja_progress("[ 3/ 9] x"), Some((3, 9)));
         assert_eq!(ninja_progress("no"), None);
         assert_eq!(tool_progress("scan: 5 10"), Some((5, 10)));
+        assert_eq!(tool_progress("prepare: 4900 9943"), Some((4900, 9943)));
+        assert_eq!(tool_progress("prepare: ready"), None);
+        assert_eq!(tool_progress("prepare: done programs=9943 prepared=9943 failed=0 seconds=42.0"), None);
     }
 }

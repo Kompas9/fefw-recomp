@@ -124,6 +124,7 @@ export const en = {
     'setup.step.harness': 'Shader translator',
     'setup.step.shaders': 'Translate the shaders',
     'setup.step.ini': 'Write fefw.ini',
+    'setup.step.prepare': 'Prepare the shaders for your GPU',
     'setup.check.decrypted': 'exefs/main is decrypted',
     'setup.check.version': 'supported version ({version})',
     'setup.err.noFolder': 'No folder chosen yet.',
